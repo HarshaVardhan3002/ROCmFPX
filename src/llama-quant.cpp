@@ -5,6 +5,7 @@
 #include "llama.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <cinttypes>
@@ -233,6 +234,87 @@ struct tensor_metadata {
     std::string     remapped_imatrix_name;
     bool            allows_quantization;
     bool            requires_imatrix;
+    bool            add_scale = false; // write "<name>.scale" (see rocmfpx_tensor_scale_*)
+};
+
+//
+// ROCmFPX tensor scales
+//
+// ROCmFPX block scales are UE4M3 with a fixed range (smallest normal step 2^-7), so blocks of small weights lose
+// precision. With LLAMA_ROCMFPX_TENSOR_SCALE=1 such tensors are multiplied by a power of two per tensor (per expert
+// for 3D tensors) before quantization and the inverse is stored as "<name>.scale", which the graph multiplies back.
+//
+
+static bool rocmfpx_tensor_scale_enabled() {
+    const char * env = getenv("LLAMA_ROCMFPX_TENSOR_SCALE");
+    return env != nullptr && atoi(env) != 0;
+}
+
+// log2 of the largest code a block holds, rounded up (block scale ~ max_abs / qmax)
+static int rocmfpx_qmax_log2(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q8_0_ROCMFPX:      return 7;
+        case GGML_TYPE_Q6_0_ROCMFPX:      return 5;
+        case GGML_TYPE_Q4_0_ROCMFP4:
+        case GGML_TYPE_Q4_0_ROCMFP4_FAST: return 4;
+        case GGML_TYPE_Q4_0_ROCMI4:       return 3;
+        case GGML_TYPE_Q3_0_ROCMFPX:
+        case GGML_TYPE_Q2_0_ROCMFPX:      return 2;
+        default:                          return -1;
+    }
+}
+
+// weights whose ".scale" is loaded by the generic pass in llama_model::load_tensors and applied by build_lora_mm(_id)
+static bool rocmfpx_tensor_scale_supported(const std::string & name) {
+    static const std::regex pattern(R"(^(output|blk\.\d+\.(attn_(q|k|v|qkv|output)|ffn_(gate|up|down)(_exps|_shexp)?))\.weight$)");
+    return std::regex_match(name, pattern);
+}
+
+// histogram of block max_abs (blocks of 32) by binary exponent, one per expert
+struct rocmfpx_block_hist {
+    std::array<int64_t, 128> n = {};
+
+    void add(const float * x, int64_t n_per_row) {
+        for (int64_t j = 0; j < n_per_row; j += 32) {
+            float m = 0.0f;
+            for (int64_t l = j; l < std::min<int64_t>(j + 32, n_per_row); ++l) {
+                m = std::max(m, std::fabs(x[l]));
+            }
+            if (m > 0.0f && std::isfinite(m)) {
+                int e;
+                std::frexp(m, &e); // m in [2^(e-1), 2^e)
+                n[std::clamp(e + 64, 0, 127)]++;
+            }
+        }
+    }
+
+    // k so that the 1% smallest blocks get a scale of at least 2^-6 (one bit above the smallest normal UE4M3 value),
+    // capped so that the largest block scale stays at most 2^6 and the scaled weights stay at most 2^14 (F16 range)
+    int exponent(int qmax_log2) const {
+        int64_t total = 0;
+        for (int64_t c : n) {
+            total += c;
+        }
+        if (total == 0) {
+            return 0;
+        }
+        int e_lo = 0;
+        int e_hi = 0;
+        int64_t acc = 0;
+        for (int i = 0; i < 128; ++i) {
+            if (n[i] == 0) {
+                continue;
+            }
+            if (acc*100 < total) {
+                e_lo = i - 64;
+            }
+            acc += n[i];
+            e_hi = i - 64;
+        }
+        const int k_need = qmax_log2 - 5 - e_lo;
+        const int k_cap  = std::min(5 + qmax_log2 - e_hi, 14 - e_hi);
+        return std::clamp(std::min(k_need, k_cap), 0, 30);
+    }
 };
 
 //
@@ -1535,6 +1617,14 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     // flag for --dry-run
     bool will_require_imatrix = false;
 
+    const bool rocmfpx_scale = rocmfpx_tensor_scale_enabled() && !params->keep_split && !params->dry_run;
+    if (rocmfpx_scale) {
+        LLAMA_LOG_INFO("%s: LLAMA_ROCMFPX_TENSOR_SCALE: adding power-of-two .scale tensors to ROCmFPX weights\n", __func__);
+    }
+
+    // descriptors of the added ".scale" tensors
+    ggml_context_ptr ctx_scale { ggml_init({ tensors.size()*ggml_tensor_overhead(), nullptr, true }) };
+
     //
     // preliminary iteration over all weights
     //
@@ -1555,6 +1645,20 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             metadata[i].target_type = llama_tensor_get_type(qs, params, tensor, default_type, metadata[i]);
         } else {
             metadata[i].target_type = tensor->type;
+        }
+
+        // the scale tensor ("blk.N.attn_q.weight" -> "blk.N.attn_q.scale") follows its weight in the output file
+        if (rocmfpx_scale && metadata[i].allows_quantization && metadata[i].target_type != tensor->type &&
+            rocmfpx_qmax_log2(metadata[i].target_type) >= 0 && rocmfpx_tensor_scale_supported(metadata[i].name)) {
+            const std::string base = metadata[i].name.substr(0, metadata[i].name.size() - strlen("weight"));
+            const std::string scale_name = base + "scale";
+            // with a bias some graphs apply the scale after the bias, so leave those weights alone
+            if (ml.get_tensor_meta(scale_name.c_str()) == nullptr && ml.get_tensor_meta((base + "bias").c_str()) == nullptr) {
+                ggml_tensor * s = ggml_new_tensor_1d(ctx_scale.get(), GGML_TYPE_F32, tensor->ne[2]);
+                ggml_set_name(s, scale_name.c_str());
+                gguf_add_tensor(ctx_outs[i_split].get(), s);
+                metadata[i].add_scale = true;
+            }
         }
 
         metadata[i].requires_imatrix = tensor_requires_imatrix(tensor->name, metadata[i].target_type, ftype);
@@ -1669,6 +1773,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         bool quantize = cur_type != new_type;
 
         size_t new_size;
+        std::vector<int> scale_exp; // per expert, when tm.add_scale
 
         if (params->dry_run) {
             // the --dry-run option calculates the final quantization size without quantizing
@@ -1756,23 +1861,56 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                 static const int64_t min_chunk_size = 32 * 512;
                 const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row));
 
+                // load rows [ir, ir + nrows_cur) as f32
+                auto load_f32 = [&](int64_t ir, int64_t nrows_cur) -> const float * {
+                    const int64_t nelements_cur = nrows_cur * n_per_row;
+                    const void * src = load_range(ir*row_size_src, nrows_cur*row_size_src);
+                    if (tensor->type == GGML_TYPE_F32 && !tm.add_scale) {
+                        return (const float *) src;
+                    }
+                    if (f32_conv_buf.size() < (size_t) nelements_cur) {
+                        f32_conv_buf.resize(nelements_cur);
+                    }
+                    if (tensor->type == GGML_TYPE_F32) {
+                        memcpy(f32_conv_buf.data(), src, nelements_cur*sizeof(float));
+                    } else {
+                        llama_tensor_dequantize_impl(tensor->type, src, (float *) f32_conv_buf.data(), workers, nelements_cur, nthread);
+                    }
+                    return (const float *) f32_conv_buf.data();
+                };
+
+                // power-of-two exponent per expert, from a first pass over the rows
+                if (tm.add_scale) {
+                    std::vector<rocmfpx_block_hist> hist(tensor->ne[2]);
+                    for (int64_t ir = 0; ir < nrows_total; ir += nrows_slab) {
+                        const int64_t nrows_cur = std::min(nrows_slab, nrows_total - ir);
+                        const float * x = load_f32(ir, nrows_cur);
+                        for (int64_t r = 0; r < nrows_cur; ++r) {
+                            hist[(ir + r)/nrows_per_expert].add(x + r*n_per_row, n_per_row);
+                        }
+                    }
+                    for (const auto & h : hist) {
+                        scale_exp.push_back(h.exponent(rocmfpx_qmax_log2(new_type)));
+                    }
+                    const auto [k_min, k_max] = std::minmax_element(scale_exp.begin(), scale_exp.end());
+                    LLAMA_LOG_INFO("x 2^%d..2^%d, ", *k_min, *k_max);
+                }
+
                 // process rows across all experts in one pass to keep all threads busy
                 new_size = 0;
                 for (int64_t ir = 0; ir < nrows_total; ir += nrows_slab) {
                     const int64_t nrows_cur = std::min(nrows_slab, nrows_total - ir);
                     const int64_t nelements_cur = nrows_cur * n_per_row;
 
-                    const void * src = load_range(ir*row_size_src, nrows_cur*row_size_src);
-
-                    const float * f32_data;
-                    if (tensor->type == GGML_TYPE_F32) {
-                        f32_data = (const float *) src;
-                    } else {
-                        if (f32_conv_buf.size() < (size_t) nelements_cur) {
-                            f32_conv_buf.resize(nelements_cur);
+                    const float * f32_data = load_f32(ir, nrows_cur);
+                    if (tm.add_scale) {
+                        float * x = (float *) f32_conv_buf.data();
+                        for (int64_t r = 0; r < nrows_cur; ++r) {
+                            const int k = scale_exp[(ir + r)/nrows_per_expert];
+                            for (int64_t j = 0; j < n_per_row; ++j) {
+                                x[r*n_per_row + j] = std::ldexp(x[r*n_per_row + j], k);
+                            }
                         }
-                        llama_tensor_dequantize_impl(tensor->type, src, (float *) f32_conv_buf.data(), workers, nelements_cur, nthread);
-                        f32_data = (const float *) f32_conv_buf.data();
                     }
 
                     if (work.size() < nrows_cur*row_size_dst) {
@@ -1798,6 +1936,18 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
             // tensor data is already written, add the padding
             zeros(fout, GGML_PAD(new_size, align) - new_size);
+
+            if (tm.add_scale) {
+                GGML_ASSERT(scale_exp.size() == (size_t) tensor->ne[2]);
+                std::vector<float> inv(tensor->ne[2]);
+                for (size_t e = 0; e < inv.size(); ++e) {
+                    inv[e] = std::ldexp(1.0f, -scale_exp[e]);
+                }
+                const size_t scale_size = inv.size()*sizeof(float);
+                fout.write((const char *) inv.data(), scale_size);
+                zeros(fout, GGML_PAD(scale_size, align) - scale_size);
+                total_size_new += scale_size;
+            }
 
             // unmap the tensor to free memory
             if (ml.use_mmap) { ml.unmap_weight(weight); }

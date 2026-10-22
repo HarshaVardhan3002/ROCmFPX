@@ -152,13 +152,13 @@ llama_model_kolibri1::graph::graph(const llama_model & model, const llm_graph_pa
                 (llama_expert_gating_func_type) hparams.expert_gating_func,
                 il,
                 logits,
-                nullptr, nullptr, nullptr, nullptr, selected);
+                nullptr, layer.ffn_up_exps_s, layer.ffn_gate_exps_s, layer.ffn_down_exps_s, selected);
         cb(moe_out, "ffn_moe_out", il);
 
         ggml_tensor * shared = build_ffn(cur,
-                layer.ffn_up_shexp,   nullptr, nullptr,
-                layer.ffn_gate_shexp, nullptr, nullptr,
-                layer.ffn_down_shexp, nullptr, nullptr, nullptr,
+                layer.ffn_up_shexp,   nullptr, layer.ffn_up_shexp_s,
+                layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+                layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s, nullptr,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(shared, "ffn_shexp_out", il);
 
