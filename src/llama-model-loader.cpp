@@ -71,6 +71,23 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:    name = LLAMA_FTYPE_PREFIX "IQ4_XS - 4.25 bpw"; break;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:     name = LLAMA_FTYPE_PREFIX "IQ3_S - 3.4375 bpw"; break;
         case LLAMA_FTYPE_MOSTLY_IQ3_M:     name = LLAMA_FTYPE_PREFIX "IQ3_S mix - 3.66 bpw"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_LEAN: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_COHERENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST_COHERENT: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_FAST_COHERENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMFP4_STRIX_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX: name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX: name = LLAMA_FTYPE_PREFIX "Q2_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX: name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX"; break;
+        case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMI4: name = LLAMA_FTYPE_PREFIX "Q4_0_ROCMI4"; break;
+        case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX_AGENT: name = LLAMA_FTYPE_PREFIX "Q3_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX_AGENT: name = LLAMA_FTYPE_PREFIX "Q8_0_ROCMFPX_AGENT"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_LEAN: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_LEAN"; break;
+        case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT_LEAN: name = LLAMA_FTYPE_PREFIX "Q6_0_ROCMFPX_AGENT_LEAN"; break;
         default:                           name = LLAMA_FTYPE_PREFIX "unknown, may not work"; break;
     }
     return (ftype & LLAMA_FTYPE_GUESSED) ? name : name + guessed_prefix_len;
@@ -757,6 +774,13 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_F16:     ftype = LLAMA_FTYPE_MOSTLY_F16;     break;
             case GGML_TYPE_BF16:    ftype = LLAMA_FTYPE_MOSTLY_BF16;    break;
             case GGML_TYPE_Q4_0:    ftype = LLAMA_FTYPE_MOSTLY_Q4_0;    break;
+            case GGML_TYPE_Q4_0_ROCMFP4: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4; break;
+            case GGML_TYPE_Q4_0_ROCMFP4_FAST: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_FAST; break;
+            case GGML_TYPE_Q3_0_ROCMFPX: ftype = LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX; break;
+            case GGML_TYPE_Q2_0_ROCMFPX: ftype = LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX; break;
+            case GGML_TYPE_Q6_0_ROCMFPX: ftype = LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX; break;
+            case GGML_TYPE_Q8_0_ROCMFPX: ftype = LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX; break;
+            case GGML_TYPE_Q4_0_ROCMI4: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_ROCMI4; break;
             case GGML_TYPE_Q4_1:    ftype = LLAMA_FTYPE_MOSTLY_Q4_1;    break;
             case GGML_TYPE_Q5_0:    ftype = LLAMA_FTYPE_MOSTLY_Q5_0;    break;
             case GGML_TYPE_Q5_1:    ftype = LLAMA_FTYPE_MOSTLY_Q5_1;    break;

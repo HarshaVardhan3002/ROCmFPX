@@ -1,3 +1,68 @@
+# ROCmFPX
+
+This is llama.cpp with the ROCmFPX and ROCmFP4 quantization types, rebased onto current upstream
+llama.cpp. It is built and tested on AMD Strix Halo (Radeon 8060S, gfx1151) with Vulkan.
+
+The ROCmFPX and ROCmFP4 formats, presets and kernels were written by
+[charlie12345 (Carlo Pasquale)](https://github.com/charlie12345/ROCmFPX), caf, ciru-ai and the other
+contributors of that repository. This fork moves their work onto a newer llama.cpp and fixes a few bugs.
+
+## What is in it
+
+| Type | Bits per weight | Notes |
+|---|---|---|
+| `Q4_0_ROCMFP4` | 4.50 | 4-bit codebook, UE4M3 scales |
+| `Q4_0_ROCMFP4_FAST` | 4.25 | single-scale layout, faster |
+| `Q2_0_ROCMFPX` | 2.50 | S40 codebook, two UE4M3 scales |
+| `Q3_0_ROCMFPX` | 3.50 | |
+| `Q6_0_ROCMFPX` | 6.50 | |
+| `Q8_0_ROCMFPX` | 8.25 | |
+| `Q4_0_ROCMI4` | 4.25 | signed 4-bit, no codebook; no Vulkan shaders yet |
+
+`llama-quantize --help` lists the full recipes (`_STRIX`, `_LEAN`, `_COHERENT`, `_AGENT`, `_EVEN`).
+
+## Changes compared to charlie12345/ROCmFPX
+
+- Merged onto upstream llama.cpp `c7fc50941`.
+- Vulkan: the ROCm types use the new upstream LUT and `store_a` code paths.
+- Vulkan: fixed `Q6_0_ROCMFPX`. The shaders read 32 one-byte values per block, but the block holds
+  32 packed 6-bit codes in 24 bytes. All Vulkan results for this type were wrong before.
+- `llama-quantize` keeps MTP and EAGLE draft projections at Q8_0 and counts NextN layers correctly.
+- Leftover TurboQuant code was removed.
+
+## Tests
+
+On a Strix Halo PC (Windows, Vulkan SDK 1.4.350):
+
+- `test-quantize-fns`: all ROCm types pass.
+- `test-backend-ops -b Vulkan0 -p rocm`: 1326 tests pass, 0 fail.
+- `test-backend-ops -b ROCm0 -p rocm` (HIP SDK 7.2, gfx1151): 1669 tests pass, 0 fail, all 7 types.
+- `llama-quantize` writes byte-identical tensors to charlie12345/ROCmFPX `fb08d7c` for all 19 ROCm
+  recipes plus `Q4_K_M` and `Q8_0`.
+
+The CUDA kernels for the ROCm types give wrong results on NVIDIA GB10 (sm_121). Use them on CPU,
+Vulkan or HIP.
+
+## Build
+
+```sh
+# Vulkan
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j
+
+# ROCm / HIP on Strix Halo
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1151
+cmake --build build --config Release -j
+```
+
+## License
+
+MIT, like llama.cpp. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+
+The rest of this file is the upstream llama.cpp README.
+
+---
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)

@@ -3291,6 +3291,16 @@ struct test_cpy : public test_case {
         if (type_src == type_dst) {
             return 0.0;
         }
+        if ((type_dst == GGML_TYPE_Q4_0_ROCMFP4 || type_dst == GGML_TYPE_Q4_0_ROCMFP4_FAST ||
+             type_dst == GGML_TYPE_Q3_0_ROCMFPX || type_dst == GGML_TYPE_Q6_0_ROCMFPX || type_dst == GGML_TYPE_Q8_0_ROCMFPX) &&
+            (type_src == GGML_TYPE_F16 || type_src == GGML_TYPE_BF16)) {
+            // Vulkan and ROCm/HIP quantize half/bfloat sources directly on
+            // device. The exhaustive ROCmFP4 scale search is the same as the
+            // CPU path, but source precision and tie points can choose a nearby
+            // scale/code pair. Keep this bounded to the half/bfloat runtime
+            // quantization cases rather than loosening F32->ROCmFP4 checks.
+            return 5e-4;
+        }
         if (type_dst == GGML_TYPE_Q4_0 || type_dst == GGML_TYPE_Q4_1 || type_dst == GGML_TYPE_IQ4_NL ||
             type_dst == GGML_TYPE_Q5_0 || type_dst == GGML_TYPE_Q5_1 || type_dst == GGML_TYPE_Q8_0) {
             // estimate what the max nmse error would be if one quantized value is
@@ -9902,6 +9912,8 @@ static const ggml_type all_types[] = {
     GGML_TYPE_Q1_0,
     GGML_TYPE_Q2_0,
     GGML_TYPE_MXFP4, GGML_TYPE_NVFP4,
+    GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4,
+    GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
     GGML_TYPE_Q2_K, GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
     GGML_TYPE_Q6_K,
@@ -9920,7 +9932,8 @@ static const ggml_type base_types[] = {
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1, // for I8MM tests
     GGML_TYPE_Q4_K,
-    GGML_TYPE_MXFP4, GGML_TYPE_NVFP4, // TODO: or "other"
+    GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4, GGML_TYPE_NVFP4, // TODO: or "other"
+    GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
     GGML_TYPE_IQ2_XXS
 };
 
@@ -10187,6 +10200,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
     test_cases.emplace_back(new test_rope_set_rows(GGML_TYPE_F32, GGML_TYPE_I32, { 128, 32, 8, 1 }, GGML_ROPE_TYPE_IMROPE));
+
+    for (ggml_type type : {GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX}) {
+        test_cases.emplace_back(new test_rope_set_rows(type, GGML_TYPE_I64, { 128, 32, 8, 1 }, GGML_ROPE_TYPE_NEOX));
+        test_cases.emplace_back(new test_rope_set_rows(type, GGML_TYPE_I64, { 128, 32, 256, 1 }, GGML_ROPE_TYPE_NEOX));
+    }
 
     for (ggml_type type_input : {GGML_TYPE_F32}) {
         for (ggml_op_pool pool_type : {GGML_OP_POOL_AVG, GGML_OP_POOL_MAX}) {
@@ -11416,6 +11434,31 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8,   2, false, 512,  n, 256,  1e5f));
     }
 
+    // ROCmFP2 decode shapes that cross the AMD k >= 2048 threshold for
+    // backend-internal Q8_1 staging in the dense and routed vector paths.
+    for (int n : {1, 2, 4, 8}) {
+        test_cases.emplace_back(new test_mul_mat(
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_F32, 64, n, 2048, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat_id(
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_F32, 8, 2, false, 64, n, 2048));
+    }
+
+    // HY3 exact routed-expert shapes for the native ROCmFPX low-bit kernels:
+    // 192 experts, top-8, 4096 hidden, 1536 intermediate. Generic IQ/K types
+    // use the standard correctness matrices below; their full tensors take
+    // several minutes per case on WebGPU.
+    for (int bs : {1, 4, 32, 128}) {
+        for (ggml_type type_a : {
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX}) {
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 1536, bs, 4096));
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 4096, bs, 1536));
+        }
+    }
+
+    for (ggml_type type_a : all_types) {
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 4, 2, false, 64, 16, 3*ggml_blck_size(type_a)));
+    }
+
     for (ggml_type type_a : base_types) {
         for (ggml_type type_b : {GGML_TYPE_F32 /*, GGML_TYPE_F16 */}) {
             for (int n_mats : {4, 8}) {
@@ -12533,6 +12576,27 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_cpy(GGML_TYPE_F32,  GGML_TYPE_F32,  {3072, 512, 2, 1}, {-1,-1,-1,-1}, {0, 2, 1, 3}));
     test_cases.emplace_back(new test_cpy(GGML_TYPE_F32,  GGML_TYPE_Q4_0, {8192, 512, 2, 1}));
     test_cases.emplace_back(new test_cpy(GGML_TYPE_Q4_0, GGML_TYPE_F32,  {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q4_0_ROCMFP4,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_Q4_0_ROCMFP4,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_BF16, GGML_TYPE_Q4_0_ROCMFP4,     {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_F32,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q4_0_ROCMFP4_FAST, {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_Q4_0_ROCMFP4_FAST, {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_BF16, GGML_TYPE_Q4_0_ROCMFP4_FAST, {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_F32, {8192, 512, 2, 1}));
+
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q3_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_Q3_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_BF16, GGML_TYPE_Q3_0_ROCMFPX,     {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_F32,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q6_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_Q6_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_BF16, GGML_TYPE_Q6_0_ROCMFPX,     {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_F32,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_Q8_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_Q8_0_ROCMFPX,      {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_BF16, GGML_TYPE_Q8_0_ROCMFPX,     {8192, 512, 2, 1}));
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_Q8_0_ROCMFPX, GGML_TYPE_F32,      {8192, 512, 2, 1}));
 
     test_cases.emplace_back(new test_cpy(GGML_TYPE_F32, GGML_TYPE_F32, {768*1024, 256, 1, 1}, {-1,-1,-1,-1}, {1, 0, 2, 3}, {0, 0, 0, 0}));
     test_cases.emplace_back(new test_cpy(GGML_TYPE_F16, GGML_TYPE_F16, {768*1024, 256, 1, 1}, {-1,-1,-1,-1}, {1, 0, 2, 3}, {0, 0, 0, 0}));
@@ -12633,6 +12697,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
 
+    // HY3: 192 routed experts, top-8, hidden size 4096, expert intermediate size 1536.
+    // Cover both the gate/up projection and the reversed down projection at decode
+    // and prompt-sized batches for the native ROCmFPX low-bit kernels.
+    for (int bs : {1, 4, 32, 128}) {
+        for (ggml_type type_a : {
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX,
+                GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S,
+                GGML_TYPE_Q2_K, GGML_TYPE_Q3_K}) {
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 1536, bs, 4096));
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 4096, bs, 1536));
+        }
+    }
+
     for (int bs : {1, 4, 8, 32, 64, 128, 256, 512}) {
         for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ4_XS}) {
             for (ggml_type type_b : {GGML_TYPE_F32}) {
@@ -12686,6 +12763,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4));
+    test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMFP4_FAST));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {12, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4));
+    test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {12, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMFP4_FAST));
 
     // sparse decode at long context
     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, { 8, 1}, 49152, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, false,    0));
