@@ -688,6 +688,39 @@ class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         self._try_set_pooling_type()
+        self._set_qev_decision()
+
+    # OneJev qev decision checkpoints (baselabs elephant-1, mammoth-1): "modeling_overrides" in config.json,
+    # readout.json and an optional calibration.json next to the weights; served by llama-decide
+    _QEV_NOT_ONE_TOKEN = {"BQ", "BZ", "CJ", "CQ", "CZ", "DQ", "DZ", "EJ", "EY", "FJ", "FQ", "FV", "FZ", "GJ", "GK",
+                          "GQ", "GZ", "HJ", "IY", "JF", "JG", "JH", "JL", "JN", "JQ"}
+
+    def _set_qev_decision(self):
+        cfg = json.loads((self.dir_model / "config.json").read_text(encoding="utf-8"))
+        ov = cfg.get("modeling_overrides")
+        if not ov:
+            return
+        readout_path = self.dir_model / "readout.json"
+        ro = json.loads(readout_path.read_text(encoding="utf-8")) if readout_path.is_file() else {}
+        readout = ov.get("readout", ro.get("readout", "slot_lm"))
+        if readout != "slot_lm":
+            raise ValueError(f"qev readout {readout!r} is not supported, only slot_lm")
+        attn = ov.get("attention", {})
+        if attn.get("linear_attention", "causal") != "causal":
+            raise ValueError(f"qev linear_attention mask {attn['linear_attention']!r} is not supported")
+        letters = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+        labels = letters + [a + b for a in letters for b in letters if a + b not in self._QEV_NOT_ONE_TOKEN]
+        labels = labels[: int(ov.get("n_slots", ro.get("n_slots", 256)))]
+        arch = self.gguf_writer.arch
+        self.gguf_writer.add_decision_type(gguf.DecisionType.BASELABS_QEV)
+        self.gguf_writer.add_string(f"{arch}.decision.attention", attn.get("full_attention", "causal"))
+        self.gguf_writer.add_decision_labels(labels)
+        cal_path = self.dir_model / "calibration.json"
+        if cal_path.is_file():
+            # qev keys are "kind" or "kind:K"
+            for name, t in json.loads(cal_path.read_text(encoding="utf-8")).get("temperatures", {}).items():
+                self.gguf_writer.add_decision_temperature(name.replace(":", "."), float(t))
+        logger.info(f"gguf: qev decision model, attention {attn.get('full_attention')}, {len(labels)} labels")
 
 
 def _is_openjev_checkpoint(dir_model: Path) -> bool:
