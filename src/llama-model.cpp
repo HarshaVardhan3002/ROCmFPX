@@ -1857,12 +1857,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 layer.nextn.shared_head_head_in_s = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "input_scale", i), {1}, TENSOR_NOT_REQUIRED);
             }
         }
-        // output scales
+        // output scales (the weight scale also comes with ROCmFPX tensor scales, see llama-quant.cpp)
+        if (output && !output_s) {
+            output_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "scale"), {1}, TENSOR_NOT_REQUIRED);
+        }
         if (output && output->type == GGML_TYPE_NVFP4) {
-            // weight scale
-            if (!output_s) {
-                output_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "scale"), {1}, TENSOR_NOT_REQUIRED);
-            }
             // input scale
             if (!output_in_s) {
                 output_in_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "input_scale"), {1}, TENSOR_NOT_REQUIRED);
