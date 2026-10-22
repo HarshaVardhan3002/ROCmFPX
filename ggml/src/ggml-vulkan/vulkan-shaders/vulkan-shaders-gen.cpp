@@ -72,6 +72,12 @@ const std::vector<std::string> type_names = {
     "iq4_nl",
     "mxfp4",
     "nvfp4",
+    "rocmfp4",
+    "rocmfp4_fast",
+    "rocmfpx_fp2",
+    "rocmfpx_fp3",
+    "rocmfpx_fp6",
+    "rocmfpx_fp8",
     "tq1_0",
     "tq2_0",
     "bf16",
@@ -246,8 +252,12 @@ bool is_iq_quant(const std::string& type_name) {
     return string_starts_with(type_name, "iq");
 }
 
+bool is_rocm_quant(const std::string& type_name) {
+    return string_starts_with(type_name, "rocmfp");
+}
+
 bool is_lut_quant(const std::string& type_name) {
-    return is_iq_quant(type_name) || type_name == "mxfp4" || type_name == "nvfp4";
+    return is_iq_quant(type_name) || type_name == "mxfp4" || type_name == "nvfp4" || is_rocm_quant(type_name);
 }
 
 std::string lut_load_vec_a(const std::string& type_name) {

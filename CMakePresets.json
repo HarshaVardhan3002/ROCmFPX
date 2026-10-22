@@ -32,6 +32,20 @@
     { "name": "vulkan",   "hidden": true, "cacheVariables": { "GGML_VULKAN":      "ON" } },
 
     {
+        "name": "strix-rocmfpx",
+        "inherits": [ "base", "release" ],
+        "description": "ROCmFPX build for AMD Strix Halo (gfx1151): HIP + Vulkan + native CPU",
+        "cacheVariables": {
+            "GGML_HIP":                 "ON",
+            "AMDGPU_TARGETS":           "gfx1151",
+            "CMAKE_HIP_ARCHITECTURES":  "gfx1151",
+            "GGML_VULKAN":              "ON",
+            "GGML_NATIVE":              "ON",
+            "LLAMA_CURL":               "OFF"
+        }
+    },
+
+    {
         "name": "x64-windows-llvm", "hidden": true,
         "cacheVariables": {
             "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/x64-windows-llvm.cmake"
