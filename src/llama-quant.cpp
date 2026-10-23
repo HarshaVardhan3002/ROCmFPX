@@ -235,6 +235,8 @@ struct tensor_metadata {
     bool            allows_quantization;
     bool            requires_imatrix;
     bool            add_scale = false; // write "<name>.scale" (see rocmfpx_tensor_scale_*)
+    int             fold_scale = -1;   // index of an existing "<name>.scale" that is folded into this weight
+    bool            write_ones = false; // this is such a folded ".scale": write 1.0 instead of the stored values
 };
 
 //
@@ -1595,8 +1597,10 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
     // compute tensor metadata once and cache it
     std::vector<tensor_metadata> metadata(tensors.size());
+    std::unordered_map<std::string, int> tensor_index;
     for (size_t i = 0; i < tensors.size(); ++i) {
         metadata[i].name = ggml_get_name(tensors[i]->tensor);
+        tensor_index[metadata[i].name] = (int) i;
     }
 
     // initialize quantization state counters and metadata categories
@@ -1658,6 +1662,22 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                 ggml_set_name(s, scale_name.c_str());
                 gguf_add_tensor(ctx_outs[i_split].get(), s);
                 metadata[i].add_scale = true;
+            }
+        }
+
+        // a quantized weight that already has a ".scale" (NVFP4 experts keep their global scale there) is stored
+        // unscaled, often far above the ROCmFPX block-scale range: fold the scale into the weights before requantizing
+        if (metadata[i].allows_quantization && metadata[i].target_type != tensor->type && ggml_is_quantized(tensor->type) &&
+            rocmfpx_qmax_log2(metadata[i].target_type) >= 0 && metadata[i].name.size() > strlen("weight") &&
+            metadata[i].name.compare(metadata[i].name.size() - strlen("weight"), std::string::npos, "weight") == 0) {
+            const std::string base = metadata[i].name.substr(0, metadata[i].name.size() - strlen("weight"));
+            const auto it_s = tensor_index.find(base + "scale");
+            if (it_s != tensor_index.end()) {
+                const ggml_tensor * s = tensors[it_s->second]->tensor;
+                if (s->type == GGML_TYPE_F32 && ggml_nelements(s) == tensor->ne[2]) {
+                    metadata[i].fold_scale = it_s->second;
+                    metadata[it_s->second].write_ones = true;
+                }
             }
         }
 
@@ -1795,7 +1815,13 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             continue;
         } else {
             // no --dry-run, perform quantization
-            if (!quantize) {
+            if (!quantize && tm.write_ones) {
+                // folded into its weight (see fold_scale)
+                new_size = tensor_size;
+                LLAMA_LOG_INFO("size = %8.3f MiB, folded into the weight\n", tensor_size/1024.0/1024.0);
+                const std::vector<float> ones(ggml_nelements(tensor), 1.0f);
+                fout.write((const char *) ones.data(), tensor_size);
+            } else if (!quantize) {
                 new_size = tensor_size;
                 LLAMA_LOG_INFO("size = %8.3f MiB\n", tensor_size/1024.0/1024.0);
 
@@ -1861,11 +1887,24 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                 static const int64_t min_chunk_size = 32 * 512;
                 const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row));
 
+                // per-expert values of a folded ".scale"
+                std::vector<float> fold;
+                if (tm.fold_scale >= 0) {
+                    const auto & sw = *tensors[tm.fold_scale];
+                    fold.resize(ggml_nelements(sw.tensor));
+                    const size_t nbytes = fold.size()*sizeof(float);
+                    const void * p = ml.load_data_range(sw, 0, nbytes, fold.data());
+                    if (p != fold.data()) {
+                        memcpy(fold.data(), p, nbytes);
+                    }
+                    LLAMA_LOG_INFO("folding %s, ", ggml_get_name(sw.tensor));
+                }
+
                 // load rows [ir, ir + nrows_cur) as f32
                 auto load_f32 = [&](int64_t ir, int64_t nrows_cur) -> const float * {
                     const int64_t nelements_cur = nrows_cur * n_per_row;
                     const void * src = load_range(ir*row_size_src, nrows_cur*row_size_src);
-                    if (tensor->type == GGML_TYPE_F32 && !tm.add_scale) {
+                    if (tensor->type == GGML_TYPE_F32 && !tm.add_scale && fold.empty()) {
                         return (const float *) src;
                     }
                     if (f32_conv_buf.size() < (size_t) nelements_cur) {
@@ -1875,6 +1914,15 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                         memcpy(f32_conv_buf.data(), src, nelements_cur*sizeof(float));
                     } else {
                         llama_tensor_dequantize_impl(tensor->type, src, (float *) f32_conv_buf.data(), workers, nelements_cur, nthread);
+                    }
+                    if (!fold.empty()) {
+                        float * x = (float *) f32_conv_buf.data();
+                        for (int64_t r = 0; r < nrows_cur; ++r) {
+                            const float s = fold[(ir + r)/nrows_per_expert];
+                            for (int64_t j = 0; j < n_per_row; ++j) {
+                                x[r*n_per_row + j] *= s;
+                            }
+                        }
                     }
                     return (const float *) f32_conv_buf.data();
                 };
