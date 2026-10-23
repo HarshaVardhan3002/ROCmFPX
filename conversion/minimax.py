@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+
 from typing import Iterable, Sequence, TYPE_CHECKING
 
 import torch
@@ -169,6 +172,16 @@ class MiniMaxM2Model(TextModel):
 class MiniMaxM3Model(MiniMaxM2Model):
     model_arch = gguf.MODEL_ARCH.MINIMAXM3
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # transformers' MiniMaxM3 config renames sparse_attention_config / moe_layer_freq: add back the raw keys
+        cfg = self.dir_model / "config.json"
+        if cfg.is_file():
+            with open(cfg, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            for k, v in raw.get("text_config", raw).items():
+                self.hparams.setdefault(k, v)
+
     def tensor_force_quant(self, name, new_name, bid, n_dims):
         if ".indexer." in new_name:
             return gguf.GGMLQuantizationType.F32
@@ -196,6 +209,17 @@ class MiniMaxM3Model(MiniMaxM2Model):
             else:
                 break
         self.gguf_writer.add_leading_dense_block_count(n_dense)
+
+    def prepare_tensors(self):
+        # M3.1 ships its experts as NVFP4: give them the names the generic NVFP4 repack path merges
+        qc = self.hparams.get("quantization_config") or {}
+        if qc.get("moe_quant_format") == "nvfp4-pack-quantized":
+            proj = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
+            for name in list(self.model_tensors.keys()):
+                m = re.match(r"(.*\.layers\.\d+)\.block_sparse_moe\.experts\.(\d+)\.(w[123])\.(.+)$", name)
+                if m:
+                    self.model_tensors[f"{m[1]}.mlp.experts.{m[2]}.{proj[m[3]]}.{m[4]}"] = self.model_tensors.pop(name)
+        super().prepare_tensors()
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
         # Gemma-style (1 + w) RMSNorm: bake the +1 in so llama.cpp can use plain RMSNorm
