@@ -571,6 +571,20 @@ class ModelBase:
                     raise NotImplementedError(f"Quant format {quant_format!r} for method {quant_method!r} is not yet supported")
             elif quant_method in ("modelopt", "modelopt_mixed"):
                 dequant_fp8()
+            elif quant_method == "mxfp8":
+                # MXFP8 (MiniMax-M3.1): E4M3 weights, one E8M0 exponent per 32 columns in *_scale_inv
+                # NVFP4 experts (moe_quant_format) were already repacked by _generate_nvfp4_tensors
+                block_size = quant_config.get("weight_block_size") or [1, 32]
+                for name in self.model_tensors.keys():
+                    if name.endswith(".weight_scale_inv"):
+                        weight_name = name.removesuffix("_scale_inv")
+                        w = self.model_tensors[weight_name]
+                        s = self.model_tensors[name]
+                        self.model_tensors[weight_name] = lambda w=w, s=s, bs=block_size: dequant_simple(
+                            w(), torch.exp2(s().float() - 127.0), bs)
+                        tensors_to_remove.append(name)
+                        if self._fp8_as_q8:
+                            self._fp8_dequantized.add(weight_name)
             elif quant_method is not None:
                 raise NotImplementedError(f"Quant method is not yet supported: {quant_method!r}")
 
@@ -1046,9 +1060,11 @@ class ModelBase:
             input_scale_name = name.replace(".weight", ".input_scale")
             if scale_name not in self.model_tensors:
                 continue
-            # Force eager materialization of lazy tensors
-            weight = LazyTorchTensor.to_eager(self.model_tensors[name]())
-            scale = LazyTorchTensor.to_eager(self.model_tensors[scale_name]())
+            # check rank/dtype on the lazy tensors, without reading the weights
+            weight_fn = self.model_tensors[name]
+            scale_fn = self.model_tensors[scale_name]
+            weight = weight_fn()
+            scale = scale_fn()
 
             # Skip non-NVFP4 tensors(e.g. 1D scale, or float8 weight)
             if scale.ndim < 2 or weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
@@ -1073,14 +1089,12 @@ class ModelBase:
                 bid = int(bid_m.group(1)) if bid_m else 0
                 key = (bid, proj_type)
 
-                raw, shape = self._nvfp4_pack(weight, scale)
-
                 if key not in expert_blocks:
                     expert_blocks[key] = []
                     expert_scales[key] = []
                     expert_input_scales[key] = []
-                    expert_shapes[key] = shape
-                expert_blocks[key].append((expert_id, raw.copy()))
+                    expert_shapes[key] = [weight.shape[0], (scale.shape[1] // 4) * 64]
+                expert_blocks[key].append((expert_id, (weight_fn, scale_fn)))
                 # Collect per-expert scale2 (scalar per expert)
                 expert_scales[key].append((expert_id, float(scale2.float().sum())))
                 # Collect per-expert input_scale (scalar per expert)
@@ -1090,7 +1104,7 @@ class ModelBase:
                 if n_experts > 0 and len(expert_blocks[key]) >= n_experts:
                     self._flush_nvfp4_experts(key, expert_blocks, expert_scales, expert_input_scales, expert_shapes, bid, proj_type)
             else:
-                self._repack_nvfp4(name, weight, scale, scale2, input_scale)
+                self._repack_nvfp4(name, LazyTorchTensor.to_eager(weight), LazyTorchTensor.to_eager(scale), scale2, input_scale)
 
         # Flush any remaining experts (fallback if n_experts was unknown)
         for bid, proj_type in list(expert_blocks.keys()):
@@ -1112,10 +1126,23 @@ class ModelBase:
         shape = expert_shapes.pop(key)
 
         experts.sort(key=lambda x: x[0])
-        merged = np.stack([e[1] for e in experts], axis=0)
         merged_name = f"model.layers.{bid}.mlp.experts.{proj_type}.weight"
         new_name = self.map_tensor_name(merged_name)
         logger.info(f"Repacked {new_name} with shape [{len(experts)}, {shape[0]}, {shape[1]}] and quantization NVFP4")
+        # gguf_writer holds every added tensor until the final write: stack the experts lazily
+        byte_shape = (len(experts), shape[0], shape[1] // 64 * 36)
+
+        def load(fns: list[tuple[Callable[[], Tensor], Callable[[], Tensor]]]) -> np.ndarray:
+            out = np.empty(byte_shape, dtype=np.uint8)
+            for eid, (w_fn, s_fn) in enumerate(fns):
+                out[eid] = self._nvfp4_pack(LazyTorchTensor.to_eager(w_fn()), LazyTorchTensor.to_eager(s_fn()))[0]
+            return out
+
+        merged = gguf.LazyNumpyTensor(
+            meta=gguf.LazyNumpyTensor.meta_with_dtype_and_shape(np.uint8, byte_shape),
+            args=([e[1] for e in experts],),
+            func=load,
+        )
         self.gguf_writer.add_tensor(new_name, merged, raw_dtype=gguf.GGMLQuantizationType.NVFP4)
         self._tag_prec_a4(merged_name, new_name)
 
@@ -1153,6 +1180,9 @@ class ModelBase:
                 quant_layers = quant_config.get("quantized_layers", quant_layers) or {}
 
         nvfp4_compressed_tensors = self._is_nvfp4_compressed_tensors(quant_method, quant_format, quant_groups)
+        # MiniMax-M3.1: MXFP8 dense weights with compressed-tensors NVFP4 experts
+        if quantization_config.get("moe_quant_format") == "nvfp4-pack-quantized":
+            nvfp4_compressed_tensors = True
 
         self._nvfp4_global_algo = quant_algo
 
