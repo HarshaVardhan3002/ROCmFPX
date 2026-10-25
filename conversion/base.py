@@ -1045,7 +1045,7 @@ class ModelBase:
 
     def _generate_nvfp4_tensors(self):
         # Per-layer expert merging to avoid holding all experts in memory
-        expert_blocks: dict[tuple[int, str], list[tuple[int, np.ndarray]]] = {}
+        expert_blocks: dict[tuple[int, str], list[tuple[int, tuple[Callable[[], Tensor], Callable[[], Tensor]]]]] = {}
         expert_scales: dict[tuple[int, str], list[tuple[int, float]]] = {}
         expert_input_scales: dict[tuple[int, str], list[tuple[int, float]]] = {}
         expert_shapes: dict[tuple[int, str], list[int]] = {}
@@ -1143,7 +1143,7 @@ class ModelBase:
             args=([e[1] for e in experts],),
             func=load,
         )
-        self.gguf_writer.add_tensor(new_name, merged, raw_dtype=gguf.GGMLQuantizationType.NVFP4)
+        self.gguf_writer.add_tensor(new_name, cast(np.ndarray, merged), raw_dtype=gguf.GGMLQuantizationType.NVFP4)
         self._tag_prec_a4(merged_name, new_name)
 
         scales.sort(key=lambda x: x[0])

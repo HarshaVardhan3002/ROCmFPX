@@ -2,6 +2,7 @@
 
 import csv
 import re
+from typing import NoReturn
 from collections import Counter
 from pathlib import Path
 
@@ -30,7 +31,7 @@ RECIPE_ID_RE = re.compile(
 )
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"release recipe map check failed: {message}")
 
 
