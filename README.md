@@ -1,13 +1,24 @@
+<div align="center">
+
 # ROCmFPX
 
-This is llama.cpp with the ROCmFPX and ROCmFP4 quantization types, rebased onto current upstream
-llama.cpp. It is built and tested on AMD Strix Halo (Radeon 8060S, gfx1151) with Vulkan.
+**llama.cpp with ROCmFPX low-bit weight types, for AMD GPUs.**<br>
+Rebased onto current upstream llama.cpp, built and tested on AMD Strix Halo (Radeon 8060S, gfx1151) with Vulkan and HIP.
 
-The ROCmFPX and ROCmFP4 formats, presets and kernels were written by
-[charlie12345 (Carlo Pasquale)](https://github.com/charlie12345/ROCmFPX), caf, ciru-ai and the other
-contributors of that repository. This fork moves their work onto a newer llama.cpp and fixes a few bugs.
+![Backends](https://img.shields.io/badge/Vulkan%20%7C%20HIP%20%7C%20CPU-ED1C24)
+![Hardware](https://img.shields.io/badge/tested%20on-Strix%20Halo%20gfx1151-2b3137)
+![Tests](https://img.shields.io/badge/backend%20tests-1326%20Vulkan%20%C2%B7%201669%20HIP%20pass-2b3137)
+[![Models](https://img.shields.io/badge/%F0%9F%A4%97%20models-Harsha001-ED1C24)](https://huggingface.co/Harsha001)
+[![License](https://img.shields.io/badge/license-MIT-2b3137)](LICENSE)
 
-## What is in it
+[Weight types](#weight-types) · [What this fork changes](#what-this-fork-changes) · [Models built with it](#models-built-with-this-fork) · [Tests](#tests) · [Build](#build)
+
+</div>
+
+> [!NOTE]
+> **The ROCmFPX and ROCmFP4 formats, presets and kernels are not mine.** They were written by [charlie12345 (Carlo Pasquale)](https://github.com/charlie12345/ROCmFPX), caf, ciru-ai and the other contributors of that repository. This fork moves their work onto a newer llama.cpp, fixes bugs, adds tensor scales and new model support, and publishes models built with it.
+
+## Weight types
 
 | Type | Bits per weight | Notes |
 |---|---|---|
@@ -21,56 +32,109 @@ contributors of that repository. This fork moves their work onto a newer llama.c
 
 `llama-quantize --help` lists the full recipes (`_STRIX`, `_LEAN`, `_COHERENT`, `_AGENT`, `_EVEN`).
 
-## Changes compared to charlie12345/ROCmFPX
+## What this fork changes
 
-**Port to current llama.cpp**
+Compared to [charlie12345/ROCmFPX](https://github.com/charlie12345/ROCmFPX):
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🔁 Port to current llama.cpp
+
 - Merged onto upstream llama.cpp `c7fc50941`.
 - Vulkan: the ROCm types use the new upstream LUT and `store_a` code paths.
-- Vulkan: fixed `Q6_0_ROCMFPX`. The shaders read 32 one-byte values per block, but the block holds
-  32 packed 6-bit codes in 24 bytes. All Vulkan results for this type were wrong before.
-- CUDA: restored the MXFP4 `get_rows` case lost in the merge, and upstream's UE4M3 decode (the old
-  change broke subnormal NVFP4 scales on HIP).
+- Vulkan: fixed `Q6_0_ROCMFPX`. The shaders read 32 one-byte values per block, but the block holds 32 packed 6-bit codes in 24 bytes. All Vulkan results for this type were wrong before.
+- CUDA: restored the MXFP4 `get_rows` case lost in the merge, and upstream's UE4M3 decode (the old change broke subnormal NVFP4 scales on HIP).
 - `llama-quantize` keeps MTP and EAGLE draft projections at Q8_0 and counts NextN layers correctly.
 - Leftover TurboQuant code was removed.
 
-**Opt-in tensor scales for models with very small weights** (`LLAMA_ROCMFPX_TENSOR_SCALE=1`)
-- ROCmFPX block scales are UE4M3 with a fixed range, so models whose weights are tiny (block maximum
-  around 1e-3) lost most of their precision in every ROCmFPX type.
-- `llama-quantize` now multiplies such tensors by a power of two (per expert for 3D tensors) and
-  writes the inverse as a `.scale` tensor, which the graph multiplies back in.
-- RecursiveSI/flint at `Q8_0_ROCMFPX`, 40 chunks against BF16: KL divergence 3.92 -> 0.075, same top
-  token 33% -> 91%.
-- NVFP4 checkpoints that keep a per-expert global `.scale` get it folded into the weights before
-  requantizing, so the result is exact and in range.
+</td>
+<td width="50%" valign="top">
 
-**New model support**
-- MiniMax-M3.1: MXFP8 dense weights, NVFP4 compressed-tensors experts (repacked lazily so
-  conversion stays inside memory), sparse attention read from the raw `config.json`.
-- `llama-decide` for the baselabs qev decision models (elephant-1, mammoth-1): scores a JSON request
-  of candidate branches over 256 decision labels, with cyclic-shift debiasing and block-bidirectional
-  attention. Matches the PyTorch reference to within 0.004 in probability.
+### 📏 Tensor scales for very small weights
+
+Opt in with `LLAMA_ROCMFPX_TENSOR_SCALE=1`.
+
+- ROCmFPX block scales are UE4M3 with a fixed range, so models whose weights are tiny (block maximum around 1e-3) lost most of their precision in every ROCmFPX type.
+- `llama-quantize` now multiplies such tensors by a power of two (per expert for 3D tensors) and writes the inverse as a `.scale` tensor, which the graph multiplies back in.
+- NVFP4 checkpoints that keep a per-expert global `.scale` get it folded into the weights before requantizing, so the result is exact and in range.
+
+**RecursiveSI/flint at `Q8_0_ROCMFPX`**, 40 chunks against BF16:
+
+| | before | after |
+|---|---|---|
+| KL divergence | 3.92 | **0.075** |
+| same top token | 33% | **91%** |
+
+</td>
+</tr>
+</table>
+
+### 🧩 New model support
+
+- **MiniMax-M3.1:** MXFP8 dense weights, NVFP4 compressed-tensors experts (repacked lazily so conversion stays inside memory), sparse attention read from the raw `config.json`.
+- **`llama-decide`** for the baselabs qev decision models (elephant-1, mammoth-1): scores a JSON request of candidate branches over 256 decision labels, with cyclic-shift debiasing and block-bidirectional attention. Matches the PyTorch reference to within 0.004 in probability.
 
 ## Models built with this fork
 
-Every quantized file is scored by KL divergence against the BF16 original, and the model cards say
-plainly where stock llama.cpp types are closer to BF16.
+Every quantized file is scored by KL divergence against the BF16 original, and the model cards say plainly where stock llama.cpp types are closer to BF16. The download badges are live from Hugging Face and count file downloads in the last 30 days.
 
-- [ROCmFPX language models](https://huggingface.co/collections/Harsha001/rocmfpx-language-models-6add045c1e468c2d2afcf592) on Hugging Face
-- [ROCmFPX image and video models](https://huggingface.co/collections/Harsha001/rocmfpx-image-and-video-models-6add045e50d985721da52ac2)
-- [Speech on the AMD XDNA2 NPU](https://huggingface.co/collections/Harsha001/speech-on-the-amd-xdna2-npu-6add045f8a9fcd3cba9182e4) (not llama.cpp, same author)
+### Language, vision and speech models
+
+| Model | Original by | What it is | Downloads |
+|---|---|---|---|
+| [**MiniCPM-V 4.7**](https://huggingface.co/Harsha001/MiniCPM-V-4.7-35B-A3B-ROCmFPX) | openbmb | 35B mixture of experts, 3B active | <a href="https://huggingface.co/Harsha001/MiniCPM-V-4.7-35B-A3B-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FMiniCPM-V-4.7-35B-A3B-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Ornith 1.5 122B**](https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX) | ornith-ai | 122B, text generation | <a href="https://huggingface.co/Harsha001/Ornith-1.5-122B-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FOrnith-1.5-122B-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Qwen3.8 27B Uncensored**](https://huggingface.co/Harsha001/Qwen3.8-27B-Uncensored-ROCmFPX) | orcarouter | 27B, image and text to text | <a href="https://huggingface.co/Harsha001/Qwen3.8-27B-Uncensored-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FQwen3.8-27B-Uncensored-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Sage-A1.5**](https://huggingface.co/Harsha001/Sage-A1.5-ROCmFPX) | InternScience | text generation | <a href="https://huggingface.co/Harsha001/Sage-A1.5-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FSage-A1.5-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**flint**](https://huggingface.co/Harsha001/flint-ROCmFPX) | RecursiveSI | tiny weights, needed the tensor-scale fix | <a href="https://huggingface.co/Harsha001/flint-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2Fflint-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Carbon-X**](https://huggingface.co/Harsha001/Carbon-X-ROCmFPX) | HuggingFaceBio | text generation | <a href="https://huggingface.co/Harsha001/Carbon-X-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FCarbon-X-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Spark-X2.6 4B**](https://huggingface.co/Harsha001/Spark-X2.6-4B-ROCmFPX) | XHToken | 4B, text generation | <a href="https://huggingface.co/Harsha001/Spark-X2.6-4B-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FSpark-X2.6-4B-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Nemotron 3.5 Bolt E4B**](https://huggingface.co/Harsha001/NVIDIA-Nemotron-3.5-Bolt-E4B-ROCmFPX) | NVIDIA | text generation | <a href="https://huggingface.co/Harsha001/NVIDIA-Nemotron-3.5-Bolt-E4B-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FNVIDIA-Nemotron-3.5-Bolt-E4B-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Kolibri-1**](https://huggingface.co/Harsha001/Kolibri-1-ROCmFPX) | Aleph Alpha | text generation | <a href="https://huggingface.co/Harsha001/Kolibri-1-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FKolibri-1-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**Drama-3**](https://huggingface.co/Harsha001/Drama-3-ROCmFPX-GGUF) | Fish Audio | text to speech | <a href="https://huggingface.co/Harsha001/Drama-3-ROCmFPX-GGUF"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FDrama-3-ROCmFPX-GGUF&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**elephant-1**](https://huggingface.co/Harsha001/elephant-1-ROCmFPX) | baselabs | decision model, runs with <code>llama-decide</code> | <a href="https://huggingface.co/Harsha001/elephant-1-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2Felephant-1-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**mammoth-1**](https://huggingface.co/Harsha001/mammoth-1-ROCmFPX) | baselabs | decision model, runs with <code>llama-decide</code> | <a href="https://huggingface.co/Harsha001/mammoth-1-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2Fmammoth-1-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+
+<sub>Collection: [ROCmFPX language models](https://huggingface.co/collections/Harsha001/rocmfpx-language-models-6add045c1e468c2d2afcf592)</sub>
+
+### Image and video models
+
+GGUF files for [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) with ROCmFPX weight types.
+
+| Model | Original by | What it is | Downloads |
+|---|---|---|---|
+| [**FLUX.3 image klein**](https://huggingface.co/Harsha001/flux-3-image-klein-ROCmFPX) | Black Forest Labs | text to image | <a href="https://huggingface.co/Harsha001/flux-3-image-klein-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2Fflux-3-image-klein-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**MOSS-Image SFT**](https://huggingface.co/Harsha001/MOSS-Image-SFT-ROCmFPX) | OpenMOSS | text to image | <a href="https://huggingface.co/Harsha001/MOSS-Image-SFT-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FMOSS-Image-SFT-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+| [**LTX-2.5 22B dev**](https://huggingface.co/Harsha001/LTX-2.5-22B-dev-uncensored-ROCmFPX) | Lightricks | text to video | <a href="https://huggingface.co/Harsha001/LTX-2.5-22B-dev-uncensored-ROCmFPX"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FLTX-2.5-22B-dev-uncensored-ROCmFPX&query=%24.downloads&label=downloads%2F30d&color=ED1C24" alt="downloads in the last 30 days"></a> |
+
+<sub>Collection: [ROCmFPX image and video models](https://huggingface.co/collections/Harsha001/rocmfpx-image-and-video-models-6add045e50d985721da52ac2)</sub>
+
+### Speech on the AMD XDNA2 NPU
+
+Not llama.cpp: these run on the Ryzen AI NPU through Windows ML. Same author, same hardware.
+
+| Model | Original by | What it is | Downloads |
+|---|---|---|---|
+| [**Phonon-2**](https://huggingface.co/Harsha001/Phonon-2-XDNA2) | FermionResearch | speech recognition on the Ryzen AI NPU | <a href="https://huggingface.co/Harsha001/Phonon-2-XDNA2"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FPhonon-2-XDNA2&query=%24.downloads&label=downloads%2F30d&color=2b3137" alt="downloads in the last 30 days"></a> |
+| [**Underdog Bark 3.0**](https://huggingface.co/Harsha001/Underdog-Bark-3.0-XDNA2) | ConwayResearch | speech recognition on the Ryzen AI NPU | <a href="https://huggingface.co/Harsha001/Underdog-Bark-3.0-XDNA2"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fapi%2Fmodels%2FHarsha001%2FUnderdog-Bark-3.0-XDNA2&query=%24.downloads&label=downloads%2F30d&color=2b3137" alt="downloads in the last 30 days"></a> |
+
+<sub>Collection: [Speech on the AMD XDNA2 NPU](https://huggingface.co/collections/Harsha001/speech-on-the-amd-xdna2-npu-6add045f8a9fcd3cba9182e4)</sub>
 
 ## Tests
 
 On a Strix Halo PC (Windows, Vulkan SDK 1.4.350):
 
-- `test-quantize-fns`: all ROCm types pass.
-- `test-backend-ops -b Vulkan0 -p rocm`: 1326 tests pass, 0 fail.
-- `test-backend-ops -b ROCm0 -p rocm` (HIP SDK 7.2, gfx1151): 1669 tests pass, 0 fail, all 7 types.
-- `llama-quantize` writes byte-identical tensors to charlie12345/ROCmFPX `fb08d7c` for all 19 ROCm
-  recipes plus `Q4_K_M` and `Q8_0`.
+| Test | Result |
+|---|---|
+| `test-quantize-fns` | all ROCm types pass |
+| `test-backend-ops -b Vulkan0 -p rocm` | **1326 pass, 0 fail** |
+| `test-backend-ops -b ROCm0 -p rocm` (HIP SDK 7.2, gfx1151) | **1669 pass, 0 fail**, all 7 types |
+| `llama-quantize` against charlie12345/ROCmFPX `fb08d7c` | byte-identical tensors for all 19 ROCm recipes plus `Q4_K_M` and `Q8_0` |
 
-The CUDA kernels for the ROCm types give wrong results on NVIDIA GB10 (sm_121). Use them on CPU,
-Vulkan or HIP.
+> [!WARNING]
+> The CUDA kernels for the ROCm types give wrong results on NVIDIA GB10 (sm_121). Use them on CPU, Vulkan or HIP.
 
 ## Build
 
@@ -88,9 +152,10 @@ cmake --build build --config Release -j
 
 MIT, like llama.cpp. See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
 
-The rest of this file is the upstream llama.cpp README.
-
 ---
+
+<details>
+<summary><b>The upstream llama.cpp README</b> (quick start, backends, documentation)</summary>
 
 # llama.cpp
 
@@ -226,3 +291,5 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
 - [mackron/miniaudio](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [sheredom/subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+
+</details>
