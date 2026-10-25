@@ -23,12 +23,41 @@ contributors of that repository. This fork moves their work onto a newer llama.c
 
 ## Changes compared to charlie12345/ROCmFPX
 
+**Port to current llama.cpp**
 - Merged onto upstream llama.cpp `c7fc50941`.
 - Vulkan: the ROCm types use the new upstream LUT and `store_a` code paths.
 - Vulkan: fixed `Q6_0_ROCMFPX`. The shaders read 32 one-byte values per block, but the block holds
   32 packed 6-bit codes in 24 bytes. All Vulkan results for this type were wrong before.
+- CUDA: restored the MXFP4 `get_rows` case lost in the merge, and upstream's UE4M3 decode (the old
+  change broke subnormal NVFP4 scales on HIP).
 - `llama-quantize` keeps MTP and EAGLE draft projections at Q8_0 and counts NextN layers correctly.
 - Leftover TurboQuant code was removed.
+
+**Opt-in tensor scales for models with very small weights** (`LLAMA_ROCMFPX_TENSOR_SCALE=1`)
+- ROCmFPX block scales are UE4M3 with a fixed range, so models whose weights are tiny (block maximum
+  around 1e-3) lost most of their precision in every ROCmFPX type.
+- `llama-quantize` now multiplies such tensors by a power of two (per expert for 3D tensors) and
+  writes the inverse as a `.scale` tensor, which the graph multiplies back in.
+- RecursiveSI/flint at `Q8_0_ROCMFPX`, 40 chunks against BF16: KL divergence 3.92 -> 0.075, same top
+  token 33% -> 91%.
+- NVFP4 checkpoints that keep a per-expert global `.scale` get it folded into the weights before
+  requantizing, so the result is exact and in range.
+
+**New model support**
+- MiniMax-M3.1: MXFP8 dense weights, NVFP4 compressed-tensors experts (repacked lazily so
+  conversion stays inside memory), sparse attention read from the raw `config.json`.
+- `llama-decide` for the baselabs qev decision models (elephant-1, mammoth-1): scores a JSON request
+  of candidate branches over 256 decision labels, with cyclic-shift debiasing and block-bidirectional
+  attention. Matches the PyTorch reference to within 0.004 in probability.
+
+## Models built with this fork
+
+Every quantized file is scored by KL divergence against the BF16 original, and the model cards say
+plainly where stock llama.cpp types are closer to BF16.
+
+- [ROCmFPX language models](https://huggingface.co/collections/Harsha001/rocmfpx-language-models-6add045c1e468c2d2afcf592) on Hugging Face
+- [ROCmFPX image and video models](https://huggingface.co/collections/Harsha001/rocmfpx-image-and-video-models-6add045e50d985721da52ac2)
+- [Speech on the AMD XDNA2 NPU](https://huggingface.co/collections/Harsha001/speech-on-the-amd-xdna2-npu-6add045f8a9fcd3cba9182e4) (not llama.cpp, same author)
 
 ## Tests
 
