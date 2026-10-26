@@ -504,6 +504,50 @@ void block_a_to_shmem(block_a_prefetch blk, uint buf_ib, uint ks, uint loadr) {
     }
 }
 
+#elif defined(DATA_A_ROCMFP4_FAST)
+
+// Four 4-bit codes, one per byte, to int8 codebook values:
+// magnitudes {0,1,2,3,4,6,8,10}, bit 3 is the sign.
+uint32_t rocmfp4_codes_to_i8(uint32_t c) {
+    const uint32_t m = c & 0x07070707u;
+    // 5, 6, 7 -> 6, 8, 10: add the low two bits when bit 2 is set
+    const uint32_t v = m + (m & (((m >> 2) & 0x01010101u) * 3u));
+    // negate where bit 3 is set, a 0x80 bias per byte keeps bytes from borrowing
+    const uint32_t t = (v << 1) & (((c >> 3) & 0x01010101u) * 0xFFu);
+    return ((v | 0x80808080u) - t) ^ 0x80808080u;
+}
+
+// Half-scale UE4M3 without branches: subnormals are e * 2^-10, codes 127 and up are zero.
+float rocmfp4_scale(uint e) {
+    const float f = e < 8u ? float(e) * (1.0 / 1024.0) : uintBitsToFloat((e + 952u) << 20);
+    return e < 127u ? f : 0.0;
+}
+
+struct block_a_prefetch {
+    uint32_t qs;
+    uint32_t e;
+};
+
+block_a_prefetch block_a_load(uint ib, uint loadr) {
+    block_a_prefetch blk;
+    blk.qs = pack32(u8vec4(data_a[ib].qs[loadr * 4],
+                            data_a[ib].qs[loadr * 4 + 1],
+                            data_a[ib].qs[loadr * 4 + 2],
+                            data_a[ib].qs[loadr * 4 + 3]));
+    blk.e = uint(data_a[ib].e);
+    return blk;
+}
+
+void block_a_to_shmem(block_a_prefetch blk, uint buf_ib, uint ks, uint loadr) {
+    // low nibbles are elements 0-15, high nibbles 16-31
+    buf_a_qs[buf_ib * QPITCH + ks * (BK / 4) + loadr    ] = rocmfp4_codes_to_i8(blk.qs & 0x0F0F0F0F);
+    buf_a_qs[buf_ib * QPITCH + ks * (BK / 4) + loadr + 4] = rocmfp4_codes_to_i8((blk.qs >> 4) & 0x0F0F0F0F);
+
+    if (loadr == 0) {
+        buf_a_d[ks * BM + buf_ib] = rocmfp4_scale(blk.e);
+    }
+}
+
 #endif
 
 // ===== B-side: load and store =====
@@ -544,11 +588,14 @@ void block_b_to_shmem(block_b_prefetch blk, uint buf_ib, uint ks, uint loadr, bo
 // ===== Framework macros =====
 
 #ifdef MUL_MAT_ID
+// B rows past the expert's row count are padding: skip their loads and LDS stores.
+#define B_ROWS _ne1
 #define B_IB_CALC                                                                               \
             const u16vec2 row_idx = row_ids[buf_ib];                                            \
             const uint ib = pos_b_ib + row_idx.y * p.batch_stride_b / BK                        \
                           + (row_idx.x % p.ne11) * p.stride_b / BK;
 #else
+#define B_ROWS BN
 #define B_IB_CALC                                                                               \
             const uint ib = pos_b_ib + buf_ib * p.stride_b / BK;
 #endif
@@ -565,7 +612,7 @@ void block_b_to_shmem(block_b_prefetch blk, uint buf_ib, uint ks, uint loadr, bo
     }                                                                                           \
     [[unroll]] for (uint li = 0; li < B_LOADS; li++) {                                          \
         const uint buf_ib = loadc_b + li * loadstride_b;                                        \
-        if (buf_ib < BN) {                                                                      \
+        if (buf_ib < B_ROWS) {                                                                  \
             B_IB_CALC                                                                           \
             [[unroll]] for (uint ks = 0; ks < BK_STEP; ks++) {                                  \
                 const uint ib_k = ((blk) + ks * BK < end_k) ? (ib + ks) : ib;                   \
@@ -585,7 +632,7 @@ void block_b_to_shmem(block_b_prefetch blk, uint buf_ib, uint ks, uint loadr, bo
     }                                                                                           \
     [[unroll]] for (uint li = 0; li < B_LOADS; li++) {                                          \
         const uint buf_ib = loadc_b + li * loadstride_b;                                        \
-        if (buf_ib < BN) {                                                                      \
+        if (buf_ib < B_ROWS) {                                                                  \
             [[unroll]] for (uint ks = 0; ks < BK_STEP; ks++) {                                  \
                 const bool in_bounds = (blk) + ks * BK < end_k;                                 \
                 block_b_to_shmem(pre_b[li * BK_STEP + ks], buf_ib, ks, loadr_b, in_bounds);     \

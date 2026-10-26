@@ -39,6 +39,10 @@ layout (constant_id = 12) const uint MmTypeA = 0;
 #include "types.glsl"
 #include "dot_product_funcs.glsl"
 
+#if defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
+#define MM_A_RAW_TYPES
+#endif
+
 #ifndef MULMAT_QUANT
 #ifndef LOAD_VEC_A
 #define LOAD_VEC_A 1
@@ -58,13 +62,14 @@ uint mm_load_vec_a() {
     case GGML_TYPE_Q4_0:
     case GGML_TYPE_Q4_1:
     case GGML_TYPE_Q5_1:
+    case GGML_TYPE_Q4_K:
+    case GGML_TYPE_Q5_K:
+    case GGML_TYPE_Q6_K:
         return 8u;
     case GGML_TYPE_Q2_0:
     case GGML_TYPE_Q5_0:
     case GGML_TYPE_Q8_0:
     case GGML_TYPE_Q2_K:
-    case GGML_TYPE_Q4_K:
-    case GGML_TYPE_Q5_K:
         return 4u;
     default:
         return 2u;
@@ -196,6 +201,12 @@ shared FLOAT_TYPEV2 buf_b[BN * SHMEM_STRIDE];
 
 #define NUM_WARPS (BLOCK_SIZE / WARP)
 
+// Load the next k step's raw tiles into registers while the current step multiplies.
+#if defined(COOPMAT) && defined(MM_A_RAW_TYPES) && LOAD_VEC_B == 8
+#define MM_PREFETCH
+#define MM_PF_MAX 2
+#endif
+
 #ifdef COOPMAT
 shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
 #endif
@@ -219,6 +230,9 @@ void main() {
     const uint ic = 0;
 #else
     const uint ic = gl_WorkGroupID.y;
+#endif
+#if defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
+    init_rocmfp4_pairs();  // init_iq_shmem below ends with the barrier
 #endif
 #if defined(NEEDS_INIT_IQ_SHMEM) || defined(MULMAT_QUANT)
     init_iq_shmem(gl_WorkGroupSize);
@@ -338,7 +352,46 @@ void main() {
     }
 #endif
 
+#ifdef MM_PREFETCH
+    const bool use_pf = ALIGNED != 0 && BM <= MM_PF_MAX * loadstride_a && BN <= MM_PF_MAX * loadstride_b;
+    MM_A_RAW raw_a[MM_PF_MAX];
+    B_TYPE raw_b[MM_PF_MAX];
+    // B loads of MUL_MAT_ID tiles stop at the expert's last row
+#ifdef MUL_MAT_ID
+#define MM_PF_B_OK(j) ((j) * loadstride_b < BN && loadc_b + (j) * loadstride_b < _ne1)
+#else
+#define MM_PF_B_OK(j) ((j) * loadstride_b < BN)
+#endif
+    if (use_pf) {
+        [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+            if (j * loadstride_a < BM) {
+                raw_a[j] = fetch_a_raw(pos_a, loadr_a, loadc_a + j * loadstride_a);
+            }
+        }
+        [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+            if (MM_PF_B_OK(j)) {
+                raw_b[j] = fetch_b_raw(pos_b, loadr_b, loadc_b + j * loadstride_b);
+            }
+        }
+    }
+#endif
+
     for (uint block = start_k; block < end_k; block += BK) {
+#ifdef MM_PREFETCH
+        if (use_pf) {
+            [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+                if (j * loadstride_a < BM) {
+                    store_a_raw(raw_a[j], loadr_a, loadc_a + j * loadstride_a);
+                }
+            }
+            [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+                if (MM_PF_B_OK(j)) {
+                    store_b_raw(raw_b[j], loadr_b, loadc_b + j * loadstride_b);
+                }
+            }
+        } else
+#endif
+        {
         [[unroll]] for (uint l = 0; l < BM; l += loadstride_a) {
             load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k);
         }
@@ -355,11 +408,27 @@ void main() {
         #ifdef MUL_MAT_ID
         }
         #endif
+        }
 
         barrier();
 
         pos_a += BK / LOAD_VEC_A_EFF;
         pos_b += BK / LOAD_VEC_B_EFF;
+
+#ifdef MM_PREFETCH
+        if (use_pf && block + BK < end_k) {
+            [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+                if (j * loadstride_a < BM) {
+                    raw_a[j] = fetch_a_raw(pos_a, loadr_a, loadc_a + j * loadstride_a);
+                }
+            }
+            [[unroll]] for (uint j = 0; j < MM_PF_MAX; j++) {
+                if (MM_PF_B_OK(j)) {
+                    raw_b[j] = fetch_b_raw(pos_b, loadr_b, loadc_b + j * loadstride_b);
+                }
+            }
+        }
+#endif
 
 #ifdef COOPMAT
 #ifdef MUL_MAT_ID
@@ -371,6 +440,10 @@ void main() {
                 coopMatLoad(cache_a, buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
 
                 [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+#ifdef MUL_MAT_ID
+                    // padding columns past the expert's rows
+                    if (warp_c * WN + cm_col * TN >= _ne1) break;
+#endif
                     coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
 
                     sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a, cache_b, sums[cm_col * cms_per_row + cm_row]);

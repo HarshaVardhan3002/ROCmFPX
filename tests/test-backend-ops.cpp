@@ -5472,6 +5472,19 @@ struct test_mul_mat : public test_case {
     }
 };
 
+// MUL_MAT with small weights. Real models put most UE4M3 block scales of the
+// ROCmFPX types in the subnormal range; uniform [-1, 1] data never does.
+struct test_mul_mat_small_a : public test_mul_mat {
+    const float a_max;
+    test_mul_mat_small_a(ggml_type type_a, int64_t m, int64_t n, int64_t k, float a_max)
+        : test_mul_mat(type_a, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}), a_max(a_max) {}
+    std::string vars() override { return test_mul_mat::vars() + "," + VAR_TO_STR(a_max); }
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat::initialize_tensors(ctx);
+        init_tensor_uniform(ggml_get_tensor(ctx, "a"), -a_max, a_max);
+    }
+};
+
 // GGML_HINT_SRC0_IS_HADAMARD
 struct test_mul_mat_hadamard : public test_mul_mat {
     test_mul_mat_hadamard(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
@@ -5700,6 +5713,18 @@ struct test_mul_mat_id_dup : public test_mul_mat_id {
                 init_tensor_uniform(t);
             }
         }
+    }
+};
+
+// MUL_MAT_ID with small expert weights, see test_mul_mat_small_a
+struct test_mul_mat_id_small_a : public test_mul_mat_id {
+    const float a_max;
+    test_mul_mat_id_small_a(ggml_type type_a, int n_mats, int n_used, int64_t m, int64_t n, int64_t k, float a_max)
+        : test_mul_mat_id(type_a, GGML_TYPE_F32, n_mats, n_used, false, m, n, k), a_max(a_max) {}
+    std::string vars() override { return test_mul_mat_id::vars() + "," + VAR_TO_STR(a_max); }
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat_id::initialize_tensors(ctx);
+        init_tensor_uniform(ggml_get_tensor(ctx, "as"), -a_max, a_max);
     }
 };
 
@@ -7095,7 +7120,8 @@ struct test_concat : public test_case {
     const std::array<int64_t, 4> ne_a;
     const int64_t ne_b_d;
     const int dim;
-    const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim))
+    const int v; // view (1 << 0: non-cont a (first 3 dim), 1 << 1: non-cont b (first 3 dim), 1 << 2: non-cont a (last 2 dim), 1 << 3: non-cont b (last 2 dim),
+                 //       1 << 4: b is a transposed view, 1 << 5: a is a transposed view)
 
     std::string vars() override {
         return VARS_TO_STR5(type, ne_a, ne_b_d, dim, v);
@@ -7125,6 +7151,13 @@ struct test_concat : public test_case {
 
             a = ggml_view_4d(ctx, a, ne_a[0], ne_a[1], ne_a[2], ne_a[3], a->nb[1], a->nb[2], a->nb[3], 0);
             ggml_set_name(a, "view_of_a");
+        } else if (v & 32) {
+            auto ne = ne_a; std::swap(ne[0], ne[1]);
+            a = ggml_new_tensor(ctx, type, 4, ne.data());
+            ggml_set_name(a, "a");
+
+            a = ggml_transpose(ctx, a);
+            ggml_set_name(a, "transpose_of_a");
         } else {
             a = ggml_new_tensor(ctx, type, 4, ne_a.data());
             ggml_set_name(a, "a");
@@ -7144,6 +7177,13 @@ struct test_concat : public test_case {
 
             b = ggml_view_4d(ctx, b, ne_b[0], ne_b[1], ne_b[2], ne_b[3], b->nb[1], b->nb[2], b->nb[3], 0);
             ggml_set_name(b, "view_of_b");
+        } else if (v & 16) {
+            auto ne = ne_b; std::swap(ne[0], ne[1]);
+            b = ggml_new_tensor(ctx, type, 4, ne.data());
+            ggml_set_name(b, "b");
+
+            b = ggml_transpose(ctx, b);
+            ggml_set_name(b, "transpose_of_b");
         } else {
             b = ggml_new_tensor(ctx, type, 4, ne_b.data());
             ggml_set_name(b, "b");
@@ -11443,6 +11483,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_F32, 8, 2, false, 64, n, 2048));
     }
 
+    // ROCmFPX with small weights (subnormal block scales) on the vector,
+    // small-batch and matrix paths.
+    for (ggml_type type_a : {
+            GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4,
+            GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX}) {
+        for (int n : {1, 8, 64}) {
+            test_cases.emplace_back(new test_mul_mat_small_a(type_a, 256, n, 2048, 0.05f));
+            test_cases.emplace_back(new test_mul_mat_id_small_a(type_a, 8, 2, 256, n, 2048, 0.05f));
+        }
+    }
+
     // HY3 exact routed-expert shapes for the native ROCmFPX low-bit kernels:
     // 192 experts, top-8, 4096 hidden, 1536 intermediate. Generic IQ/K types
     // use the standard correctness matrices below; their full tensors take
@@ -11781,6 +11832,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {98304, 8, 1, 1}, dim == 0 ? 288 : 2, dim, 0));
         test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {20000, 3, 2, 1}, dim == 0 ? 333 : 1, dim, 1));
         test_cases.emplace_back(new test_concat(GGML_TYPE_Q8_0, {8192, 2, 1, 1}, dim == 0 ? 4096 : 1, dim, 0));
+    }
+
+    // transposed sources along dim 0, as in the delta-net conv input
+    for (ggml_type type : { GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_I32 }) {
+        test_cases.emplace_back(new test_concat(type, {3, 100, 2, 1}, 70, 0, 16));
+        test_cases.emplace_back(new test_concat(type, {3, 100, 1, 1},  1, 0, 16));
+        test_cases.emplace_back(new test_concat(type, {70, 100, 2, 1}, 3, 0, 32));
+        test_cases.emplace_back(new test_concat(type, {40, 33, 3, 2}, 65, 0, 48));
     }
 
     for (ggml_sort_order order : {GGML_SORT_ORDER_ASC, GGML_SORT_ORDER_DESC}) {
@@ -12707,6 +12766,50 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
                 GGML_TYPE_Q2_K, GGML_TYPE_Q3_K}) {
             test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 1536, bs, 4096));
             test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 4096, bs, 1536));
+        }
+    }
+
+    // ROCmFPX decode shapes: a 4B dense model (hidden 2560, FFN 10240, 16 heads)
+    // and a 35B-A3B MoE (hidden 2048, 256 experts, top-8, expert FFN 512).
+    for (int bs : {1, 2, 4, 8, 512}) {
+        for (ggml_type type_a : {
+                GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST,
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
+                GGML_TYPE_Q4_0, GGML_TYPE_MXFP4, GGML_TYPE_Q2_K, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0}) {
+            for (auto mk : std::vector<std::pair<int, int>>{{10240, 2560}, {16, 2560}, {4096, 2048}, {2048, 4096}, {512, 2048}}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, bs, mk.second, {1, 1}, {1, 1}));
+            }
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 512, bs, 2048));
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 2048, bs, 512));
+        }
+    }
+
+    // More low-bit types (1 to 4 bits) on the same shapes, one token (decode)
+    for (ggml_type type_a : {GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M, GGML_TYPE_TQ1_0, GGML_TYPE_Q1_0, GGML_TYPE_Q2_0,
+                             GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_XS}) {
+        for (auto mk : std::vector<std::pair<int, int>>{{10240, 2560}, {16, 2560}, {4096, 2048}, {2048, 4096}, {512, 2048}}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, 1, mk.second, {1, 1}, {1, 1}));
+        }
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 512, 1, 2048));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 2048, 1, 512));
+    }
+
+    // Small ops from the qwen35moe prefill: delta-net conv input concat and per-head norms
+    test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {3, 8192, 1, 1}, 512, 0, 16));
+    for (auto ne : std::vector<std::array<int64_t, 4>>{{128, 32, 512, 1}, {128, 16, 512, 1}, {256, 16, 512, 1}, {256, 2, 512, 1},
+                                                       {512, 16, 512, 1}, {1024, 8, 512, 1}, {2048, 512, 1, 1}, {2560, 512, 1, 1}}) {
+        test_cases.emplace_back(new test_rms_norm(GGML_TYPE_F32, ne));
+    }
+
+    // Attention decode and prefill for the same two models: 16 heads of 256 over 4 KV heads (4B)
+    // and 16 heads of 256 over 2 KV heads (35B-A3B), f16 KV cache.
+    for (int64_t kv : {512, 4096, 16384, 65536}) {
+        for (int nb : {1, 512}) {
+            if (nb == 512 && kv > 16384) {
+                continue;
+            }
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {4, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 2, {8, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
         }
     }
 

@@ -1849,6 +1849,12 @@ struct block_rocmfp4
     uint8_t e[2];
 };
 
+struct block_rocmfp4_packed16
+{
+    uint16_t qs[QUANT_K_ROCMFP4/2/2];
+    uint16_t e;
+};
+
 struct block_rocmfp4_fast
 {
     uint8_t qs[QUANT_K_ROCMFP4/2];
@@ -1860,6 +1866,7 @@ struct block_rocmfp4_fast
 #define QUANT_R QUANT_R_ROCMFP4
 #define QUANT_AUXF 1
 #define A_TYPE block_rocmfp4
+#define A_TYPE_PACKED16 block_rocmfp4_packed16
 #endif
 
 #if defined(DATA_A_ROCMFP4_FAST)
@@ -2073,10 +2080,13 @@ void init_iq_shmem(uvec3 wgsize)
 #endif
 
 #if defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
-const int8_t kvalues_rocmfp4_const[16] = {
-    int8_t(0), int8_t(1), int8_t(2), int8_t(3), int8_t(4), int8_t(6), int8_t(8), int8_t(10),
-    int8_t(0), int8_t(-1), int8_t(-2), int8_t(-3), int8_t(-4), int8_t(-6), int8_t(-8), int8_t(-10),
-};
+// Codebook {0, 1, 2, 3, 4, 6, 8, 10}, bit 3 is the sign. Computed instead of read
+// from a constant array, so the table setup needs no global memory load.
+int rocmfp4_kvalue(const uint i) {
+    const uint m = i & 7u;
+    const int mag = int(m + ((m >> 2) & 1u) * (m & 3u));
+    return (i & 8u) != 0u ? -mag : mag;
+}
 
 shared int8_t kvalues_rocmfp4[16];
 shared float rocmfp4_ue4m3_fp32_lut[128];
@@ -2088,7 +2098,7 @@ float rocmfp4_ue4m3_to_fp32_build(uint u) {
     const uint exp = (u >> 3) & 15u;
     const uint man = u & 7u;
     if (exp == 0u) {
-        return float(man) * (1.0 / 512.0);
+        return float(man) * (1.0 / 1024.0);
     }
 
     // ROCmFP4 codebook values are stored at half scale, so return the
@@ -2105,7 +2115,7 @@ void init_iq_shmem(uvec3 wgsize)
     // copy the tables into shared memory and sync
 #if defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
     for (uint i = gl_LocalInvocationIndex.x; i < kvalues_rocmfp4.length(); i += wgsize.x) {
-        kvalues_rocmfp4[i] = kvalues_rocmfp4_const[i];
+        kvalues_rocmfp4[i] = int8_t(rocmfp4_kvalue(i));
     }
     for (uint i = gl_LocalInvocationIndex.x; i < rocmfp4_ue4m3_fp32_lut.length(); i += wgsize.x) {
         rocmfp4_ue4m3_fp32_lut[i] = rocmfp4_ue4m3_to_fp32_build(i);

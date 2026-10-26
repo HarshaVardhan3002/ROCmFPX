@@ -39,16 +39,22 @@ layout (binding = 3) readonly buffer I {uvec2 data_i[];};
 #endif
 
 #extension GL_EXT_control_flow_attributes : enable
-#define BLOCK_SIZE 512
 
 layout (constant_id = 1) const bool do_multiply = false;
 #if RMS_NORM_ADD_FUSION
 layout (constant_id = 2) const bool do_post_multiply = false;
 #endif
+// threads per row, short rows use a smaller workgroup. Every pipeline must set it:
+// local_size_x_id makes its own spec constant whose default is 1, not 512.
+layout (constant_id = 3) const uint BLOCK_SIZE = 512;
 
-layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x_id = 3, local_size_y = 1, local_size_z = 1) in;
 
 shared FLOAT_TYPE sumsh[BLOCK_SIZE];
+
+// Rows of up to RMS_CACHE values per thread keep x and the multiplier in registers,
+// so every load is issued before the reduction instead of after it.
+#define RMS_CACHE 16
 
 void rms_norm(uint num_iters) {
     const uint ncols     = p.ne00;
@@ -80,18 +86,36 @@ void rms_norm(uint num_iters) {
 #endif
             FLOAT_TYPE sum = FLOAT_TYPE(0.0f); // partial sum for thread in warp
 
-            [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
-                FLOAT_TYPE xi = FLOAT_TYPE(0);
-                if (col < ncols) {
-                    xi = FLOAT_TYPE(data_a[a_offset + col]);
+            const bool cached = num_iters <= RMS_CACHE;
+            FLOAT_TYPE xa[RMS_CACHE];
+            FLOAT_TYPE xb[RMS_CACHE];
+            if (cached) {
+                [[unroll]] for (uint idx = 0; idx < RMS_CACHE; ++idx) {
+                    const uint col = tid + idx * BLOCK_SIZE;
+                    xa[idx] = FLOAT_TYPE(0);
+                    xb[idx] = FLOAT_TYPE(0);
+                    if (idx < num_iters && col < ncols) {
+                        xa[idx] = FLOAT_TYPE(data_a[a_offset + col]);
+                        if (do_multiply) {
+                            xb[idx] = FLOAT_TYPE(data_b[b_offset + (ncols > p.ne10 ? fastmod(col, p.ne10) : col)]);
+                        }
+                    }
+                    sum += xa[idx] * xa[idx];
                 }
-                sum += xi * xi;
+            } else {
+                [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
+                    FLOAT_TYPE xi = FLOAT_TYPE(0);
+                    if (col < ncols) {
+                        xi = FLOAT_TYPE(data_a[a_offset + col]);
+                    }
+                    sum += xi * xi;
+                }
             }
 
             sumsh[tid] = sum;
             // sum up partial sums and write back result
             barrier();
-            [[unroll]] for (int s = BLOCK_SIZE / 2; s > 0; s >>= 1) {
+            [[unroll]] for (int s = int(BLOCK_SIZE / 2); s > 0; s >>= 1) {
                 if (tid < s) {
                     sum += sumsh[tid + s];
                     sumsh[tid] = sum;
@@ -103,7 +127,25 @@ void rms_norm(uint num_iters) {
             const FLOAT_TYPE mean = sum / FLOAT_TYPE(ncols);
             const FLOAT_TYPE scale = inversesqrt(mean + FLOAT_TYPE(p.param1));
 
-            if (do_multiply) {
+            if (cached) {
+                [[unroll]] for (uint idx = 0; idx < RMS_CACHE; ++idx) {
+                    const uint col = tid + idx * BLOCK_SIZE;
+                    if (idx >= num_iters || col >= ncols) {
+                        continue;
+                    }
+                    FLOAT_TYPE value = scale * xa[idx];
+                    if (do_multiply) {
+                        value *= xb[idx];
+#if RMS_NORM_ADD_FUSION
+                        value += FLOAT_TYPE(data_c[d_offset + col]);
+                        if (do_post_multiply) {
+                            value *= FLOAT_TYPE(data_e[0]);
+                        }
+#endif
+                    }
+                    data_d[d_offset + col] = D_TYPE(value);
+                }
+            } else if (do_multiply) {
                 if (ncols > p.ne10) {
                     [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
                         if (col >= ncols) {

@@ -157,6 +157,56 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
 }
 #endif
 
+#if defined(DATA_A_ROCMFP4)
+// 16 values per call: low nibbles of bytes 8*iqs..8*iqs+7 are values 8*iqs..8*iqs+7
+// (scale e[0]), high nibbles the same values + 16 (scale e[1]).
+int32_t rocmfp4_lookup4(const uint32_t v) {
+    const u8vec4 i = unpack8(v & 0x0F0F0F0F);
+    return pack32(i8vec4(kvalues_rocmfp4[i.x], kvalues_rocmfp4[i.y], kvalues_rocmfp4[i.z], kvalues_rocmfp4[i.w]));
+}
+
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    const uint32_t v0 = pack32(u16vec2(data_a_packed16[ib_a].qs[iqs * 4    ],
+                                       data_a_packed16[ib_a].qs[iqs * 4 + 1]));
+    const uint32_t v1 = pack32(u16vec2(data_a_packed16[ib_a].qs[iqs * 4 + 2],
+                                       data_a_packed16[ib_a].qs[iqs * 4 + 3]));
+    const int32_t sum_lo = dotPacked4x8EXT(rocmfp4_lookup4(v0), cache_b_qs[0]) +
+                           dotPacked4x8EXT(rocmfp4_lookup4(v1), cache_b_qs[1]);
+    const int32_t sum_hi = dotPacked4x8EXT(rocmfp4_lookup4(v0 >> 4), cache_b_qs[2]) +
+                           dotPacked4x8EXT(rocmfp4_lookup4(v1 >> 4), cache_b_qs[3]);
+
+    // The scale table holds half scales, matching the codebook.
+    const uint e = uint(data_a_packed16[ib_a].e);
+    const float sum = ue4m3_to_fp32(uint8_t(e & 0xFFu)) * float(sum_lo) +
+                      ue4m3_to_fp32(uint8_t(e >> 8))    * float(sum_hi);
+    return FLOAT_TYPE(float(cache_b_ds.x) * sum);
+}
+#endif
+
+#if defined(DATA_A_ROCMFP4_FAST)
+// Low nibbles are values 4*iqs..4*iqs+3, high nibbles the same values + 16.
+i32vec2 repack(uint ib, uint iqs) {
+    // 1-byte loads for ROCmFP4_FAST blocks (17 bytes)
+    const uint32_t vui = pack32(u8vec4(data_a[ib].qs[iqs * 4    ],
+                                       data_a[ib].qs[iqs * 4 + 1],
+                                       data_a[ib].qs[iqs * 4 + 2],
+                                       data_a[ib].qs[iqs * 4 + 3]));
+    const u8vec4 i0 = unpack8( vui       & 0x0F0F0F0F);
+    const u8vec4 i1 = unpack8((vui >> 4) & 0x0F0F0F0F);
+
+    return i32vec2(pack32(i8vec4(kvalues_rocmfp4[i0.x], kvalues_rocmfp4[i0.y], kvalues_rocmfp4[i0.z], kvalues_rocmfp4[i0.w])),
+                   pack32(i8vec4(kvalues_rocmfp4[i1.x], kvalues_rocmfp4[i1.y], kvalues_rocmfp4[i1.z], kvalues_rocmfp4[i1.w])));
+}
+
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    const i32vec2 qs_a = repack(ib_a, iqs);
+    const int32_t q_sum = dotPacked4x8EXT(qs_a.x, cache_b_qs[0]) + dotPacked4x8EXT(qs_a.y, cache_b_qs[1]);
+
+    // The scale table holds half scales, matching the codebook.
+    return FLOAT_TYPE(float(cache_b_ds.x) * ue4m3_to_fp32(data_a[ib_a].e) * float(q_sum));
+}
+#endif
+
 #if defined(DATA_A_Q2_0)
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     int32_t q_sum = 0;

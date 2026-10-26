@@ -824,6 +824,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_add_id_f32;
 
     vk_pipeline pipeline_concat_i8, pipeline_concat_i16, pipeline_concat_i32, pipeline_concat_i64;
+    vk_pipeline pipeline_concat_transpose_16, pipeline_concat_transpose_32;
     vk_pipeline pipeline_upscale_nearest_f32, pipeline_upscale_bilinear_f32, pipeline_upscale_bicubic_f32, pipeline_upscale_bilinear_antialias_f32;
     vk_pipeline pipeline_scale_f32;
     vk_pipeline pipeline_log[2];
@@ -848,6 +849,9 @@ struct vk_device_struct {
     vk_pipeline pipeline_group_norm_f32;
     vk_pipeline pipeline_rms_norm_f32;
     vk_pipeline pipeline_rms_norm_mul_f32;
+    // short rows: 64, 128 and 256 threads per row
+    vk_pipeline pipeline_rms_norm_small_f32[3];
+    vk_pipeline pipeline_rms_norm_mul_small_f32[3];
     vk_pipeline pipeline_rms_norm_mul_add_f32;
     vk_pipeline pipeline_rms_norm_mul_add_mul_f32;
     vk_pipeline pipeline_rms_norm_mul_add_partials_f32;
@@ -963,8 +967,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_rwkv_wkv7_f32;
     vk_pipeline pipeline_gated_linear_attn_f32;
     vk_pipeline pipeline_lightning_indexer_f32[GGML_TYPE_COUNT];
-    // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
-    vk_pipeline pipeline_gated_delta_net[4][2];
+    // [size_idx][kda][wide] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
+    vk_pipeline pipeline_gated_delta_net[4][2][2];
     vk_pipeline pipeline_ssm_scan_f32_d128;
     vk_pipeline pipeline_ssm_scan_f32_d256;
     vk_pipeline pipeline_ssm_conv_f32;
