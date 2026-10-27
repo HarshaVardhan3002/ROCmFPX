@@ -3217,6 +3217,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_IMATRIX}));
     add_opt(common_arg(
+        {"--expert-stats"}, "FNAME",
+        "also write per-expert routing statistics (count, router weight, weighted output norm) to FNAME as TSV",
+        [](common_params & params, const std::string & value) {
+            params.expert_stats_file = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_IMATRIX}));
+    add_opt(common_arg(
         {"--show-statistics"},
         string_format("show imatrix statistics and then exit (default: %s)", params.show_statistics ? "true" : "false"),
         [](common_params & params) {

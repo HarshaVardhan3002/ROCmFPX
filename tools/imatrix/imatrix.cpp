@@ -12,6 +12,8 @@
 #include <climits>
 #include <clocale>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -77,7 +79,29 @@ public:
     const std::unordered_map<std::string, Stats> & get_mstats() const { return m_stats; }
     void set_n_layer_nextn(int32_t n_layer_nextn) { m_n_layer_nextn = n_layer_nextn; }
     int32_t get_n_layer_nextn() const { return m_n_layer_nextn; }
+    void save_expert_stats() const;
 private:
+    // per-expert routing statistics, for ranking experts (REAP-style saliency)
+    struct ExpertStat {
+        int64_t count  = 0;
+        double  sum_g  = 0.0; // router weight
+        double  sum_gn = 0.0; // router weight * expert output norm
+        double  sum_n  = 0.0; // expert output norm
+    };
+    struct LayerIds {
+        int64_t n_ids    = 0;
+        int64_t n_tokens = 0;
+        std::vector<int32_t> ids; // [n_tokens][n_ids]
+    };
+    bool is_moe_weighted(const ggml_tensor * t) const;
+    void store_layer_ids(const std::string & wname, const ggml_tensor * ids, int64_t n_as);
+    void collect_expert_stats(const ggml_tensor * t);
+    std::vector<std::vector<ExpertStat>>    m_expert_stats;  // [layer][expert]
+    std::vector<int64_t>                    m_expert_tokens; // tokens seen per layer
+    std::vector<LayerIds>                   m_layer_ids;     // last routing ids per layer
+    std::vector<char>                       m_moe_out;
+    std::vector<char>                       m_moe_w;
+
     std::unordered_map<std::string, Stats>  m_stats;
     common_params                           m_params;
     std::mutex                              m_mutex;
@@ -571,6 +595,7 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
     // if we return true, a follow-up call will be made with ask=false in which we can do the actual collection
     if (ask) {
         if (t->op == GGML_OP_MUL_MAT_ID) { return true; } // collect all indirect matrix multiplications
+        if (t->op == GGML_OP_MUL) { return is_moe_weighted(t); }
         if (t->op != GGML_OP_MUL_MAT) { return false; }
         // why are small batches ignored (<16 tokens)?
         if (src1->ne[1] < 16 || src1->type != GGML_TYPE_F32) { return false; }
@@ -582,6 +607,11 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (t->op == GGML_OP_MUL) {
+        collect_expert_stats(t);
+        return true;
+    }
 
     // copy the data from the GPU memory if needed
     const bool is_host = ggml_backend_buffer_is_host(src1->buffer);
@@ -618,6 +648,10 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
 
         m_ids.resize(ggml_nbytes(ids));
         ggml_backend_tensor_get(ids, m_ids.data(), 0, ggml_nbytes(ids));
+
+        if (!m_params.expert_stats_file.empty()) {
+            store_layer_ids(wname, ids, n_as);
+        }
 
         auto & e = m_stats[wname];
 
@@ -759,6 +793,116 @@ bool IMatrixCollector::collect_imatrix(struct ggml_tensor * t, bool ask, void * 
     return true;
 }
 
+static const char * k_moe_weighted = "ffn_moe_weighted-";
+
+bool IMatrixCollector::is_moe_weighted(const ggml_tensor * t) const {
+    if (m_params.expert_stats_file.empty()) {
+        return false;
+    }
+    return filter_tensor_name(t->name).rfind(k_moe_weighted, 0) == 0;
+}
+
+void IMatrixCollector::store_layer_ids(const std::string & wname, const ggml_tensor * ids, int64_t n_as) {
+    int il = -1;
+    if (sscanf(wname.c_str(), "blk.%d.", &il) != 1 || il < 0) {
+        return;
+    }
+    if ((size_t) il >= m_layer_ids.size()) {
+        m_layer_ids.resize(il + 1);
+        m_expert_stats.resize(il + 1);
+        m_expert_tokens.resize(il + 1, 0);
+    }
+    if (m_expert_stats[il].empty()) {
+        m_expert_stats[il].resize(n_as);
+    }
+
+    LayerIds & l = m_layer_ids[il];
+    l.n_ids    = ids->ne[0];
+    l.n_tokens = ids->ne[1];
+    l.ids.resize(l.n_ids * l.n_tokens);
+    for (int64_t row = 0; row < l.n_tokens; ++row) {
+        for (int64_t idx = 0; idx < l.n_ids; ++idx) {
+            l.ids[row * l.n_ids + idx] = *(const int32_t *) (m_ids.data() + row * ids->nb[1] + idx * ids->nb[0]);
+        }
+    }
+}
+
+// t = experts * weights, so for every routed (expert, token) pair the row norm is g * ||E(x)||
+// src[0] may have been overwritten in place by t, so only t and src[1] (the weights) are read
+void IMatrixCollector::collect_expert_stats(const ggml_tensor * t) {
+    const std::string name = filter_tensor_name(t->name);
+    const int il = atoi(name.c_str() + strlen(k_moe_weighted));
+    const ggml_tensor * w = t->src[1];
+
+    const int64_t ne0      = t->ne[0];
+    const int64_t n_ids    = t->ne[1];
+    const int64_t n_tokens = t->ne[2];
+
+    const bool ok = il >= 0 && (size_t) il < m_layer_ids.size() &&
+        t->type == GGML_TYPE_F32 && w != nullptr && w->type == GGML_TYPE_F32 &&
+        w->ne[0] == 1 && w->ne[1] == n_ids && w->ne[2] == n_tokens &&
+        m_layer_ids[il].n_ids == n_ids && m_layer_ids[il].n_tokens == n_tokens;
+    if (!ok) {
+        LOG_WRN("%s: skipping %s: no matching routing ids\n", __func__, name.c_str());
+        return;
+    }
+
+    const char * out = (const char *) t->data;
+    if (!ggml_backend_buffer_is_host(t->buffer)) {
+        m_moe_out.resize(ggml_nbytes(t));
+        ggml_backend_tensor_get(t, m_moe_out.data(), 0, ggml_nbytes(t));
+        out = m_moe_out.data();
+    }
+    const char * wd = (const char *) w->data;
+    if (!ggml_backend_buffer_is_host(w->buffer)) {
+        m_moe_w.resize(ggml_nbytes(w));
+        ggml_backend_tensor_get(w, m_moe_w.data(), 0, ggml_nbytes(w));
+        wd = m_moe_w.data();
+    }
+
+    const std::vector<int32_t> & ids = m_layer_ids[il].ids;
+    std::vector<ExpertStat> & st = m_expert_stats[il];
+    for (int64_t row = 0; row < n_tokens; ++row) {
+        for (int64_t idx = 0; idx < n_ids; ++idx) {
+            const int32_t ex = ids[row * n_ids + idx];
+            GGML_ASSERT(ex >= 0 && (size_t) ex < st.size());
+            const float   g  = *(const float *) (wd + idx * w->nb[1] + row * w->nb[2]);
+            const float * y  = (const float *) (out + idx * t->nb[1] + row * t->nb[2]);
+            double ss = 0.0;
+            for (int64_t j = 0; j < ne0; ++j) {
+                ss += (double) y[j] * y[j];
+            }
+            const double gn = sqrt(ss);
+            ExpertStat & s = st[ex];
+            s.count++;
+            s.sum_g  += g;
+            s.sum_gn += gn;
+            s.sum_n  += g > 0.0f ? gn / g : 0.0;
+        }
+    }
+    m_expert_tokens[il] += n_tokens;
+}
+
+void IMatrixCollector::save_expert_stats() const {
+    if (m_params.expert_stats_file.empty()) {
+        return;
+    }
+    FILE * f = fopen(m_params.expert_stats_file.c_str(), "w");
+    if (!f) {
+        LOG_ERR("%s: failed to open %s\n", __func__, m_params.expert_stats_file.c_str());
+        return;
+    }
+    fprintf(f, "layer\texpert\ttokens\tcount\tsum_g\tsum_gn\tsum_n\n");
+    for (size_t il = 0; il < m_expert_stats.size(); ++il) {
+        for (size_t ex = 0; ex < m_expert_stats[il].size(); ++ex) {
+            const ExpertStat & s = m_expert_stats[il][ex];
+            fprintf(f, "%zu\t%zu\t%lld\t%lld\t%.10g\t%.10g\t%.10g\n", il, ex,
+                (long long) m_expert_tokens[il], (long long) s.count, s.sum_g, s.sum_gn, s.sum_n);
+        }
+    }
+    fclose(f);
+}
+
 void IMatrixCollector::save_imatrix_legacy(int32_t ncall) const {
     auto fname = m_params.out_file;
 
@@ -867,6 +1011,10 @@ void IMatrixCollector::save_imatrix_legacy(int32_t ncall) const {
 void IMatrixCollector::save_imatrix(int32_t n_chunk) const {
     auto fname = m_params.out_file;
     int8_t use_legacy_format = m_params.imat_dat;
+
+    if (n_chunk <= 0) {
+        save_expert_stats();
+    }
 
     if (use_legacy_format > 0) {
         this->save_imatrix_legacy(n_chunk);
