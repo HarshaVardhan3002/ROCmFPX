@@ -1161,6 +1161,21 @@ static std::unique_ptr<clip_graph> clip_get_graph_builder(clip_ctx * ctx, const 
                 const int  n_frames = params && params->feats ? (int) (params->feats->size() / n_latent) : 1;
                 builder = std::make_unique<clip_graph_pockettts_gen>(ctx, img, gen_process, n_step, n_frames);
             } break;
+        case PROJECTOR_TYPE_MAYA2_GEN:
+            {
+                const auto gen_process = params ? params->gen_process : CLIP_GEN_PROCESS_GEN_CODE;
+                const int64_t n_codes = ctx->model.depth.head_w->ne[2] + 1;
+                // "inp_codes" takes the caller's buffer as-is, the graph must consume all of it
+                if (params && params->codes) {
+                    GGML_ASSERT(params->codes->size() % (size_t) n_codes == 0);
+                    GGML_ASSERT(params->codes->size() >= (size_t) n_codes);
+                }
+                const int   n_frames = params && params->codes ? (int) (params->codes->size() / n_codes) : 1;
+                // the reference serves the depth decoder at temp 0.7, top-k 64
+                const int   top_k = params && params->top_k > 0 ? params->top_k : 64;
+                const float temp  = params && params->temp  > 0.0f ? params->temp : 0.7f;
+                builder = std::make_unique<clip_graph_maya2_gen>(ctx, img, gen_process, n_frames, top_k, temp);
+            } break;
         case PROJECTOR_TYPE_QWEN3TTS_GEN:
             {
                 const auto  gen_process = params ? params->gen_process : CLIP_GEN_PROCESS_GEN_CODE;
@@ -2096,6 +2111,18 @@ struct clip_model_loader {
                         hparams.flow_n_step       = 1;
                         hparams.gen_eos_threshold = -4.0f;
                     } break;
+                case PROJECTOR_TYPE_MAYA2_GEN:
+                    {
+                        // kyutai/mimi decoder: upsampling_ratios [8,6,5,4], stored in encoder order
+                        hparams.audio_sample_rate = 24000;
+                        hparams.seanet_ratios     = { 4, 5, 6, 8 };
+                        hparams.seanet_n_stage    = (int32_t) hparams.seanet_ratios.size();
+                        // 12.5Hz codes -> 25Hz transformer frames
+                        hparams.mimi_downsample   = 2;
+                        // the config's sliding_window
+                        hparams.mimi_tfm_context  = 250;
+                        hparams.rope_theta        = 10000.0f;
+                    } break;
                 case PROJECTOR_TYPE_PADDLEOCR:
                     {
                         hparams.n_merge = 2;
@@ -2475,6 +2502,7 @@ struct clip_model_loader {
             model.proj_type != PROJECTOR_TYPE_GEMMA3NV &&
             model.proj_type != PROJECTOR_TYPE_QWEN3TTS_SPKENC &&
             model.proj_type != PROJECTOR_TYPE_POCKETTTS_GEN &&
+            model.proj_type != PROJECTOR_TYPE_MAYA2_GEN &&
             model.proj_type != PROJECTOR_TYPE_MUSE_SPARK_AUDIO);
 
         // layers
@@ -3307,6 +3335,89 @@ struct clip_model_loader {
                     // mimi decoder
                     model.gen_quant_out_w = get_tensor(string_format(TN_A_GEN_WAV_QUANT_OUT, "weight"));
                     model.gen_upsample_w  = get_tensor(string_format(TN_A_GEN_WAV_UPSAMPLE, "weight"));
+                    load_seanet(model.seanet, true);
+                    model.gen_tfm_layers.resize(hparams.n_layer);
+                    for (int il = 0; il < hparams.n_layer; il++) {
+                        auto & layer = model.gen_tfm_layers[il];
+                        const char * p = "a.gen.wav.tfm";
+                        layer.ln_1_w    = get_tensor(string_format(TN_LN_1,        p, il, "weight"));
+                        layer.ln_1_b    = get_tensor(string_format(TN_LN_1,        p, il, "bias"));
+                        layer.q_w       = get_tensor(string_format(TN_ATTN_Q,      p, il, "weight"));
+                        layer.k_w       = get_tensor(string_format(TN_ATTN_K,      p, il, "weight"));
+                        layer.v_w       = get_tensor(string_format(TN_ATTN_V,      p, il, "weight"));
+                        layer.o_w       = get_tensor(string_format(TN_ATTN_OUTPUT, p, il, "weight"));
+                        layer.ls_1_w    = get_tensor(string_format(TN_LS_1,        p, il, "weight"));
+                        layer.ln_2_w    = get_tensor(string_format(TN_LN_2,        p, il, "weight"));
+                        layer.ln_2_b    = get_tensor(string_format(TN_LN_2,        p, il, "bias"));
+                        layer.ff_up_w   = get_tensor(string_format(TN_FFN_UP,      p, il, "weight"));
+                        layer.ff_down_w = get_tensor(string_format(TN_FFN_DOWN,    p, il, "weight"));
+                        layer.ls_2_w    = get_tensor(string_format(TN_LS_2,        p, il, "weight"));
+                    }
+                } break;
+            case PROJECTOR_TYPE_MAYA2_GEN:
+                {
+                    auto & depth = model.depth;
+                    depth.in_proj_w    = get_tensor(string_format(TN_A_GEN_DEPTH_IN_PROJ,    "weight"));
+                    depth.code_lo_w    = get_tensor(string_format(TN_A_GEN_DEPTH_CODE_LO,    "weight"));
+                    depth.code_up_w    = get_tensor(string_format(TN_A_GEN_DEPTH_CODE_UP,    "weight"));
+                    depth.level_embd_w = get_tensor(string_format(TN_A_GEN_DEPTH_LEVEL_EMBD, "weight"));
+                    depth.cross_w      = get_tensor(string_format(TN_A_GEN_DEPTH_CROSS,      "weight"));
+                    depth.norm_w       = get_tensor(string_format(TN_A_GEN_DEPTH_NORM,       "weight"));
+                    depth.norm_b       = get_tensor(string_format(TN_A_GEN_DEPTH_NORM,       "bias"));
+                    depth.head_w       = get_tensor(string_format(TN_A_GEN_DEPTH_HEAD,       "weight"));
+
+                    // one column of cross-attention constants per layer
+                    depth.n_layer = (int32_t) depth.cross_w->ne[1];
+                    for (int il = 0; ; il++) {
+                        const char * p = "a.gen.depth";
+                        ggml_tensor * probe = get_tensor(string_format(TN_LN_1, p, il, "weight"), false);
+                        if (probe == nullptr) {
+                            break;
+                        }
+                        clip_layer layer;
+                        layer.ln_1_w    = probe;
+                        layer.ln_1_b    = get_tensor(string_format(TN_LN_1,        p, il, "bias"));
+                        layer.qkv_w     = get_tensor(string_format(TN_ATTN_QKV,    p, il, "weight"));
+                        layer.o_w       = get_tensor(string_format(TN_ATTN_OUTPUT, p, il, "weight"));
+                        layer.ln_2_w    = get_tensor(string_format(TN_LN_2,        p, il, "weight"));
+                        layer.ln_2_b    = get_tensor(string_format(TN_LN_2,        p, il, "bias"));
+                        layer.ff_up_w   = get_tensor(string_format(TN_FFN_UP,      p, il, "weight"));
+                        layer.ff_down_w = get_tensor(string_format(TN_FFN_DOWN,    p, il, "weight"));
+                        depth.blocks.push_back(layer);
+                    }
+
+                    // the graph uses a fixed level -> group table, see maya2-gen.cpp
+                    const int64_t dim     = depth.in_proj_w->ne[1];
+                    const int64_t n_level = depth.head_w->ne[2];
+                    const int64_t vocab   = depth.head_w->ne[1];
+                    if (depth.n_layer <= 0 || depth.blocks.size() != (size_t) depth.n_layer * clip_graph_maya2_gen::n_group ||
+                            n_level != clip_graph_maya2_gen::n_level || depth.head_w->ne[0] != dim ||
+                            depth.cross_w->ne[0] != dim || depth.level_embd_w->ne[0] != dim ||
+                            depth.level_embd_w->ne[1] < n_level + 1 || depth.code_lo_w->ne[1] != n_level * vocab ||
+                            depth.code_up_w->ne[0] != depth.code_lo_w->ne[0] || depth.code_up_w->ne[1] != dim ||
+                            dim % clip_graph_maya2_gen::depth_d_head != 0) {
+                        throw std::runtime_error(string_format("%s: unexpected maya2 depth decoder shapes\n", __func__));
+                    }
+
+                    model.gen_audio_embd_w      = get_tensor(string_format(TN_A_GEN_AUDIO_EMBD,      "weight"));
+                    model.gen_audio_embd_norm_w = get_tensor(string_format(TN_A_GEN_AUDIO_EMBD_NORM, "weight"));
+                    if (model.gen_audio_embd_w->ne[1] != (n_level + 1) * vocab ||
+                            model.gen_audio_embd_w->ne[0] != depth.in_proj_w->ne[0]) {
+                        throw std::runtime_error(string_format("%s: unexpected maya2 audio embedding shape\n", __func__));
+                    }
+
+                    // mimi decoder: split RVQ, then the pocket-tts decoder layout
+                    auto & c2w = model.c2w;
+                    c2w.quant_first_out_w = get_tensor(string_format(TN_A_GEN_WAV_QUANT_FIRST_OUT, "weight"));
+                    c2w.quant_first_cb_w  = get_tensor(string_format(TN_A_GEN_WAV_QUANT_FIRST_CB,  "weight"));
+                    c2w.quant_rest_out_w  = get_tensor(string_format(TN_A_GEN_WAV_QUANT_REST_OUT,  "weight"));
+                    c2w.quant_rest_cb_w   = get_tensor(string_format(TN_A_GEN_WAV_QUANT_REST_CB,   "weight"));
+                    if (c2w.quant_rest_cb_w->ne[2] != n_level || c2w.quant_first_cb_w->ne[1] != vocab ||
+                            c2w.quant_rest_cb_w->ne[1] != vocab) {
+                        throw std::runtime_error(string_format("%s: unexpected mimi codebook shapes\n", __func__));
+                    }
+
+                    model.gen_upsample_w = get_tensor(string_format(TN_A_GEN_WAV_UPSAMPLE, "weight"));
                     load_seanet(model.seanet, true);
                     model.gen_tfm_layers.resize(hparams.n_layer);
                     for (int il = 0; il < hparams.n_layer; il++) {
@@ -4313,6 +4424,10 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
             ctx_gen_audio = new clip_ctx(ctx_params);
             loader.load_hparams(ctx_gen_audio->model, CLIP_MODALITY_GEN_AUDIO);
             loader.load_tensors(*ctx_gen_audio);
+            if (ctx_gen_audio->model.proj_type == PROJECTOR_TYPE_MAYA2_GEN) {
+                // 31 depth levels in one graph
+                ctx_gen_audio->max_nodes = 32768;
+            }
             // TODO: fix warmup
             ctx_gen_audio->buf_compute_meta.resize(ctx_gen_audio->max_nodes * ggml_tensor_overhead() + ggml_graph_overhead());
         }
@@ -4724,6 +4839,7 @@ int clip_n_output_tokens(const clip_ctx * ctx, const clip_image_f32 * img) {
                 n_patches = img->nx() / hop;
             } break;
         case PROJECTOR_TYPE_POCKETTTS_GEN:
+        case PROJECTOR_TYPE_MAYA2_GEN:
             {
                 // one latent per call for GEN_CODE, GEN_WAV sizes its input from the caller
                 n_patches = 1;
@@ -4778,6 +4894,7 @@ static std::vector<c2w_state_slot> list_gen_state_slots(const clip_hparams & hpa
     switch (model.proj_type) {
         case PROJECTOR_TYPE_QWEN3TTS_GEN:  return list_c2w_state_slots(hparams, model);
         case PROJECTOR_TYPE_POCKETTTS_GEN: return list_pockettts_state_slots(hparams, model);
+        case PROJECTOR_TYPE_MAYA2_GEN:     return list_pockettts_state_slots(hparams, model);
         default:                           return {};
     }
 }
@@ -5742,6 +5859,69 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
                     set_input_f32("inp_noise", noise);
                 }
             } break;
+        case PROJECTOR_TYPE_MAYA2_GEN:
+            {
+                // codes are ggml_get_rows indices, bound them
+                const int64_t vocab   = model.depth.head_w->ne[1];
+                const int64_t n_level = model.depth.head_w->ne[2];
+                const int64_t n_codes = n_level + 1;
+                if (params->gen_process == CLIP_GEN_PROCESS_GEN_WAV) {
+                    GGML_ASSERT(params->codes != nullptr);
+                    const auto & src = *params->codes;
+                    const int64_t n_frames = (int64_t) src.size() / n_codes;
+                    for (const int32_t c : src) {
+                        if (c < 0 || (int64_t) c >= vocab) {
+                            LOG_ERR("%s: code out of range (%d, vocab %lld)\n", __func__, c, (long long) vocab);
+                            return false;
+                        }
+                    }
+                    // frame-major input to group-major
+                    std::vector<int32_t> codes(src.size());
+                    for (int64_t f = 0; f < n_frames; f++) {
+                        for (int64_t g = 0; g < n_codes; g++) {
+                            codes[g * n_frames + f] = src[f * n_codes + g];
+                        }
+                    }
+                    set_input_i32("inp_codes", codes);
+                    set_gen_state_in();
+                } else {
+                    if (params->code0 < 0 || (int64_t) params->code0 >= vocab) {
+                        LOG_ERR("%s: code0 out of range (%d, vocab %lld)\n", __func__, params->code0, (long long) vocab);
+                        return false;
+                    }
+                    std::vector<int32_t> code0 = { params->code0 };
+                    set_input_i32("inp_code0", code0);
+
+                    // optional teacher forcing: a given code >= 0 replaces the sampled one at its level
+                    std::vector<float> bias(vocab * n_level, 0.0f);
+                    if (params->codes != nullptr) {
+                        if ((int64_t) params->codes->size() != n_codes) {
+                            LOG_ERR("%s: expected %lld forced codes\n", __func__, (long long) n_codes);
+                            return false;
+                        }
+                        for (int64_t l = 0; l < n_level; l++) {
+                            const int32_t c = (*params->codes)[l + 1];
+                            if (c >= vocab) {
+                                LOG_ERR("%s: forced code out of range (%d)\n", __func__, c);
+                                return false;
+                            }
+                            if (c >= 0) {
+                                std::fill(bias.begin() + l * vocab, bias.begin() + (l + 1) * vocab, -INFINITY);
+                                bias[l * vocab + c] = 0.0f;
+                            }
+                        }
+                    }
+                    set_input_f32("inp_bias", bias);
+
+                    // one uniform(0,1) draw per level, used by the in-graph sampler
+                    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                    std::vector<float> r(n_level);
+                    for (auto & v : r) {
+                        v = dist(params->gen_state->rng);
+                    }
+                    set_input_f32("inp_rand", r);
+                }
+            } break;
         case PROJECTOR_TYPE_GEMMA4V:
         case PROJECTOR_TYPE_GEMMA4UV:
             {
@@ -6392,11 +6572,12 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
         out_audio.resize(ggml_nelements(audio));
         ggml_backend_tensor_get(audio, out_audio.data(), 0, ggml_nbytes(audio));
 
-        // drop the tail audio that comes from the code-0 rear padding
-        const int64_t n_codes    = params->codes ? model.gen_code_head_w->ne[2] + 1 : 0;
+        // drop the tail audio that comes from the code-0 rear padding (qwen3-tts only)
+        const bool    padded     = model.proj_type == PROJECTOR_TYPE_QWEN3TTS_GEN && params->codes;
+        const int64_t n_codes    = padded ? model.gen_code_head_w->ne[2] + 1 : 0;
         const int64_t n_frames_w = hparams.wav_tfm_swa;
-        const int64_t n_frames   = params->codes ? (int64_t) params->codes->size() / n_codes : n_frames_w;
-        if (n_frames < n_frames_w) {
+        const int64_t n_frames   = padded ? (int64_t) params->codes->size() / n_codes : n_frames_w;
+        if (padded && n_frames < n_frames_w) {
             const size_t hop = out_audio.size() / n_frames_w;
             out_audio.resize((size_t) n_frames * hop);
         }
@@ -6599,6 +6780,8 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
             return ctx->model.spk_proj_w->ne[1];
         case PROJECTOR_TYPE_POCKETTTS_GEN:
             return ctx->model.gen_input_lin_w->ne[1];
+        case PROJECTOR_TYPE_MAYA2_GEN:
+            return ctx->model.depth.in_proj_w->ne[0];
         case PROJECTOR_TYPE_PARAKEET:
             return ctx->model.mm_1_w->ne[1];
         default:

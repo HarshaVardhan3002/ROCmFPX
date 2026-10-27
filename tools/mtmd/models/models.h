@@ -379,6 +379,10 @@ struct clip_graph_pockettts_seanet : clip_graph {
     ggml_tensor * encode(ggml_tensor * x) const;
     // x: [T, dim] -> [T * hop, 1], streams when state_in is populated
     ggml_tensor * decode(ggml_tensor * x) const;
+
+    // streaming mimi decoder: [dim, n_frames] quantizer output -> PCM [n_samples], clamped to [-1, 1]
+    // adds the state_in_* inputs and state_out_* outputs to the graph
+    ggml_tensor * mimi_decode(ggml_tensor * cur, int rope_type, ffn_op_type ffn_op);
 };
 
 // mimi encoder + speaker_proj: reference waveform -> voice conditioning rows
@@ -407,6 +411,31 @@ struct clip_graph_pockettts_gen : clip_graph {
     ggml_tensor * modulate(ggml_tensor * x, ggml_tensor * shift, ggml_tensor * scale) const;
     ggml_tensor * time_embed(const clip_flow_net::time_embd & te, float t) const;
     ggml_tensor * flow_forward(ggml_tensor * cond, ggml_tensor * x, float s, float t) const;
+};
+
+//
+// maya2 generation:
+// GEN_CODE = depth decoder, backbone hidden state + code 0 -> codes 1..31 + the next backbone input
+// GEN_WAV  = kyutai mimi decoder, a window of 32-code frames -> PCM
+//
+struct clip_graph_maya2_gen : clip_graph {
+    clip_graph_maya2_gen(clip_ctx * ctx, const clip_image_f32 & img, clip_gen_process_type gen_process, int n_frames, int top_k, float temp)
+        : clip_graph(ctx, img), gen_process(gen_process), n_frames(n_frames), top_k(top_k), temp(temp) {}
+    ggml_cgraph * build() override;
+
+    static constexpr int n_group      = 11; // weight groups of the depth decoder
+    static constexpr int n_level      = 31; // codebook levels it predicts
+    static constexpr int depth_d_head = 64;
+
+    // levels 1-8 have private groups, 9-16, 17-24 and 25-31 share one each
+    static int group_of_level(int level) { return level <= 8 ? level - 1 : 8 + (level - 9) / 8; }
+
+    clip_gen_process_type gen_process;
+    int   n_frames; // GEN_WAV only
+    int   top_k;    // GEN_CODE only
+    float temp;     // GEN_CODE only
+
+    ggml_tensor * depth_trunk(ggml_tensor * x, int group) const;
 };
 
 // one persisted state buffer used by code2wav, see qwen3tts-gen.cpp

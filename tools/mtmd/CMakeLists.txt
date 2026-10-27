@@ -67,6 +67,7 @@ add_library(mtmd
             models/pockettts-seanet.cpp
             models/pockettts-spkenc.cpp
             models/pockettts-gen.cpp
+            models/maya2-gen.cpp
             models/step3vl.cpp
             models/siglip.cpp
             models/whisper-enc.cpp

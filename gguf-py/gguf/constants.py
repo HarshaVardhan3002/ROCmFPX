@@ -719,6 +719,7 @@ class MODEL_ARCH(IntEnum):
     NANBEIGE         = auto()
     QWEN3TTS         = auto()
     POCKETTTS        = auto()
+    MAYA2            = auto()
     K2HORIZON        = auto()
     KOLIBRI1         = auto()
 
@@ -1281,6 +1282,21 @@ class MODEL_TENSOR(IntEnum):
     A_GEN_WAV_SEANET_RES_CONV1 = auto()
     A_GEN_WAV_SEANET_RES_CONV2 = auto()
     A_GEN_WAV_SEANET_SCALE_CONV = auto() # strided upsample convtr
+    A_GEN_AUDIO_EMBD         = auto() # maya2: per-level code table, feeds the frame back to the backbone
+    A_GEN_AUDIO_EMBD_NORM    = auto() # maya2: RMSNorm after the table sum
+    A_GEN_DEPTH_IN_PROJ      = auto() # maya2 depth decoder: backbone hidden -> depth dim
+    A_GEN_DEPTH_CODE_LO      = auto() # factorized code embedding, per level rows
+    A_GEN_DEPTH_CODE_UP      = auto() # factorized code embedding, shared up-projection
+    A_GEN_DEPTH_LEVEL_EMBD   = auto() # one row per prefix position
+    A_GEN_DEPTH_CROSS        = auto() # cross-attn output for the null speaker memory, one column per layer
+    A_GEN_DEPTH_NORM         = auto()
+    A_GEN_DEPTH_HEAD         = auto() # per-level output head, merged 3D [n_levels, vocab, dim]
+    A_GEN_DEPTH_ATTN_NORM    = auto() # blk = group * n_layer + layer
+    A_GEN_DEPTH_ATTN_QKV     = auto()
+    A_GEN_DEPTH_ATTN_OUT     = auto()
+    A_GEN_DEPTH_FFN_NORM     = auto()
+    A_GEN_DEPTH_FFN_UP       = auto()
+    A_GEN_DEPTH_FFN_DOWN     = auto()
     A_MMPROJ              = auto()
     A_MMPROJ_FC           = auto()
     A_MM_NORM_PRE         = auto()
@@ -1542,6 +1558,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.NANBEIGE:         "nanbeige",
     MODEL_ARCH.QWEN3TTS:         "qwen3tts",
     MODEL_ARCH.POCKETTTS:        "pockettts",
+    MODEL_ARCH.MAYA2:            "maya2",
     MODEL_ARCH.K2HORIZON:        "k2-horizon",
     MODEL_ARCH.KOLIBRI1:         "kolibri1",
 }
@@ -2096,6 +2113,21 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.A_GEN_WAV_SEANET_RES_CONV1: "a.gen.wav.seanet.blk.{bid}.res_conv1",
     MODEL_TENSOR.A_GEN_WAV_SEANET_RES_CONV2: "a.gen.wav.seanet.blk.{bid}.res_conv2",
     MODEL_TENSOR.A_GEN_WAV_SEANET_SCALE_CONV: "a.gen.wav.seanet.blk.{bid}.scale_conv",
+    MODEL_TENSOR.A_GEN_AUDIO_EMBD:          "a.gen.audio_embd",
+    MODEL_TENSOR.A_GEN_AUDIO_EMBD_NORM:     "a.gen.audio_embd_norm",
+    MODEL_TENSOR.A_GEN_DEPTH_IN_PROJ:       "a.gen.depth.in_proj",
+    MODEL_TENSOR.A_GEN_DEPTH_CODE_LO:       "a.gen.depth.code_lo",
+    MODEL_TENSOR.A_GEN_DEPTH_CODE_UP:       "a.gen.depth.code_up",
+    MODEL_TENSOR.A_GEN_DEPTH_LEVEL_EMBD:    "a.gen.depth.level_embd",
+    MODEL_TENSOR.A_GEN_DEPTH_CROSS:         "a.gen.depth.cross",
+    MODEL_TENSOR.A_GEN_DEPTH_NORM:          "a.gen.depth.norm",
+    MODEL_TENSOR.A_GEN_DEPTH_HEAD:          "a.gen.depth.head",
+    MODEL_TENSOR.A_GEN_DEPTH_ATTN_NORM:     "a.gen.depth.blk.{bid}.ln1",
+    MODEL_TENSOR.A_GEN_DEPTH_ATTN_QKV:      "a.gen.depth.blk.{bid}.attn_qkv",
+    MODEL_TENSOR.A_GEN_DEPTH_ATTN_OUT:      "a.gen.depth.blk.{bid}.attn_out",
+    MODEL_TENSOR.A_GEN_DEPTH_FFN_NORM:      "a.gen.depth.blk.{bid}.ln2",
+    MODEL_TENSOR.A_GEN_DEPTH_FFN_UP:        "a.gen.depth.blk.{bid}.ffn_up",
+    MODEL_TENSOR.A_GEN_DEPTH_FFN_DOWN:      "a.gen.depth.blk.{bid}.ffn_down",
     MODEL_TENSOR.A_MMPROJ:                  "mm.a.mlp.{bid}",
     MODEL_TENSOR.A_MMPROJ_FC:               "mm.a.fc",
     MODEL_TENSOR.A_MM_NORM_PRE:             "mm.a.norm_pre",
@@ -2476,6 +2508,21 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.A_GEN_WAV_SEANET_RES_CONV1,
         MODEL_TENSOR.A_GEN_WAV_SEANET_RES_CONV2,
         MODEL_TENSOR.A_GEN_WAV_SEANET_SCALE_CONV,
+        MODEL_TENSOR.A_GEN_AUDIO_EMBD,
+        MODEL_TENSOR.A_GEN_AUDIO_EMBD_NORM,
+        MODEL_TENSOR.A_GEN_DEPTH_IN_PROJ,
+        MODEL_TENSOR.A_GEN_DEPTH_CODE_LO,
+        MODEL_TENSOR.A_GEN_DEPTH_CODE_UP,
+        MODEL_TENSOR.A_GEN_DEPTH_LEVEL_EMBD,
+        MODEL_TENSOR.A_GEN_DEPTH_CROSS,
+        MODEL_TENSOR.A_GEN_DEPTH_NORM,
+        MODEL_TENSOR.A_GEN_DEPTH_HEAD,
+        MODEL_TENSOR.A_GEN_DEPTH_ATTN_NORM,
+        MODEL_TENSOR.A_GEN_DEPTH_ATTN_QKV,
+        MODEL_TENSOR.A_GEN_DEPTH_ATTN_OUT,
+        MODEL_TENSOR.A_GEN_DEPTH_FFN_NORM,
+        MODEL_TENSOR.A_GEN_DEPTH_FFN_UP,
+        MODEL_TENSOR.A_GEN_DEPTH_FFN_DOWN,
         MODEL_TENSOR.A_ENC_CONV_NORM_MEAN,
         MODEL_TENSOR.A_ENC_CONV_NORM_VAR,
         MODEL_TENSOR.A_ENC_MEL_FILTERS,
@@ -6140,6 +6187,22 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_UP,
     ],
+    MODEL_ARCH.MAYA2: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
     MODEL_ARCH.K2HORIZON: [
         MODEL_TENSOR.TOKEN_EMBD,
         MODEL_TENSOR.OUTPUT_NORM,
@@ -6528,6 +6591,7 @@ class VisionProjectorType:
     QWEN3TTS_GEN = "qwen3tts_gen" # audio generation: code_predictor
     POCKETTTS_SPKENC = "pockettts_spkenc" # audio: mimi encoder as voice-prompt encoder
     POCKETTTS_GEN = "pockettts_gen" # audio generation: flow-matching decoder + mimi decoder
+    MAYA2_GEN = "maya2_gen" # audio generation: depth decoder + mimi decoder
     HUNYUANVL      = "hunyuanvl"
     PARAKEET       = "parakeet"  # audio
     MINIMAXM3      = "minimax_m3"

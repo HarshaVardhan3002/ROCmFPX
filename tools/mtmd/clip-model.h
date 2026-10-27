@@ -512,6 +512,21 @@ struct clip_flow_net {
     std::vector<block> blocks;
 };
 
+// maya2 depth decoder: backbone hidden state + code 0 -> codes 1..n_level
+// one private trunk per group of levels, n_layer blocks each (blocks[group * n_layer + layer])
+struct clip_depth {
+    ggml_tensor * in_proj_w    = nullptr;
+    ggml_tensor * code_lo_w    = nullptr; // [rank, n_level * vocab]
+    ggml_tensor * code_up_w    = nullptr; // [rank, dim]
+    ggml_tensor * level_embd_w = nullptr; // [dim, n_level + 1]
+    ggml_tensor * cross_w      = nullptr; // [dim, n_layer], cross-attn output for the null speaker memory
+    ggml_tensor * norm_w       = nullptr;
+    ggml_tensor * norm_b       = nullptr;
+    ggml_tensor * head_w       = nullptr; // [dim, vocab, n_level]
+    std::vector<clip_layer> blocks;
+    int32_t n_layer = 0;
+};
+
 // qwen3tts code2wav: RVQ codes -> raw PCM
 struct clip_code2wav {
     // "upsample" stage: one ConvNeXt block plus the causal ConvTranspose1d before it
@@ -844,6 +859,11 @@ struct clip_model {
     ggml_tensor * gen_quant_out_w = nullptr; // latent -> decoder dim
     ggml_tensor * gen_upsample_w  = nullptr; // depthwise convtr, frame rate -> encoder frame rate
     std::vector<clip_layer> gen_tfm_layers; // mimi decoder_transformer
+
+    // maya2: depth decoder and the frame feedback embedding (the mimi decoder uses the fields above and c2w.quant_*)
+    clip_depth depth;
+    ggml_tensor * gen_audio_embd_w      = nullptr; // [n_embd, n_codebook * vocab]
+    ggml_tensor * gen_audio_embd_norm_w = nullptr;
 
     // cogvlm
     ggml_tensor * mm_post_fc_norm_w = nullptr;

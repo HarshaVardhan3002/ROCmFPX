@@ -624,7 +624,8 @@ struct mtmd_context {
         ctx_v = res.ctx_v;
         ctx_a = res.ctx_a;
         ctx_gen_a = res.ctx_gen_a;
-        if (!ctx_v && !ctx_a) {
+        // a generation-only mmproj (maya2) has no encoder
+        if (!ctx_v && !ctx_a && !ctx_gen_a) {
             throw std::runtime_error(string_format("Failed to load CLIP model from %s\n", mmproj_fname));
         }
 
@@ -641,7 +642,7 @@ struct mtmd_context {
 
         // since we already validate n_embd of vision and audio mmproj,
         // we can safely assume that they are the same
-        int n_embd_clip = clip_n_mmproj_embd(ctx_v ? ctx_v : ctx_a);
+        const int n_embd_clip = ctx_v || ctx_a ? clip_n_mmproj_embd(ctx_v ? ctx_v : ctx_a) : n_embd_text;
         if (n_embd_text > 0 && n_embd_text != n_embd_clip) {
             throw std::runtime_error(string_format(
                 "mismatch between text model (n_embd = %d) and mmproj (n_embd = %d)\n"
@@ -2082,6 +2083,10 @@ mtmd_gen_audio_info mtmd_gen_audio_get_info(const mtmd_context * ctx) {
             info.type = MTMD_GEN_AUDIO_TYPE_POCKETTTS;
             info.sample_rate = 24000;
             break;
+        case PROJECTOR_TYPE_MAYA2_GEN:
+            info.type = MTMD_GEN_AUDIO_TYPE_MAYA2;
+            info.sample_rate = 24000;
+            break;
         default:
             info.type = MTMD_GEN_AUDIO_TYPE_NONE;
             break;
@@ -2106,6 +2111,12 @@ mtmd_gen_inp mtmd_gen_inp_default(const mtmd_context * ctx) {
         case PROJECTOR_TYPE_POCKETTTS_GEN:
             // https://github.com/kyutai-labs/pocket-tts/blob/main/pocket_tts/default_parameters.py
             inp.top_k = 50;
+            inp.top_p = 1.0f;
+            inp.temp  = 0.7f;
+            break;
+        case PROJECTOR_TYPE_MAYA2_GEN:
+            // depth decoder settings of the reference server (maya3 engine)
+            inp.top_k = 64;
             inp.top_p = 1.0f;
             inp.temp  = 0.7f;
             break;
@@ -2186,6 +2197,12 @@ static int32_t mtmd_gen_audio_process_impl(mtmd_context * ctx, mtmd_gen_state * 
         std::vector<float>   out_feats;
         bool is_eos = false;
 
+        // optional teacher forcing, maya2 only
+        std::vector<int32_t> forced;
+        if (clip_get_projector_type(ctx_clip) == PROJECTOR_TYPE_MAYA2_GEN && inp->codes && inp->n_codes > 0) {
+            forced.assign(inp->codes, inp->codes + inp->n_codes);
+        }
+
         clip_encode_params params;
         params.imgs          = &batch;
         params.n_threads     = ctx->n_threads;
@@ -2199,6 +2216,7 @@ static int32_t mtmd_gen_audio_process_impl(mtmd_context * ctx, mtmd_gen_state * 
         params.temp          = inp->temp;
         params.out_is_eos    = &is_eos;
         params.gen_state     = state->clip_state;
+        params.codes         = forced.empty() ? nullptr : &forced;
 
         if (!clip_encode(ctx_clip, &params)) {
             LOG_ERR("%s: clip_encode failed (gen_code)\n", __func__);

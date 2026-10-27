@@ -59,3 +59,28 @@ The [upstream repository](https://huggingface.co/kyutai/pocket-tts) holds one co
 python convert_hf_to_gguf.py path/to/pocket-tts/languages/english --outfile pocket-tts.gguf
 python convert_hf_to_gguf.py path/to/pocket-tts/languages/english --mmproj --outfile mmproj-pocket-tts.gguf
 ```
+
+## Maya2
+
+[maya-research/maya2-native](https://huggingface.co/maya-research/maya2-native): a Qwen3 backbone predicts code 0 of each 12.5 Hz frame, a small depth decoder predicts codes 1..31, and the kyutai Mimi decoder turns the codes into 24 kHz audio.
+
+Available params:
+- `--tts-lang` can be `en`, `hi`, `bn`, `ta`, `te`, `kn`, `ml`, `mr`, `gu`, `pa`, `or`, `as` (default: `en`)
+- pick a built-in voice by starting the prompt with `{Name}:`, for example `{Anirban}: Hello world` (default voice: `Ahana`)
+- `--tts-speaker-file` is not used
+- the backbone sampling (temperature 0.9, presence penalty, top-k 64) and the stop rule follow the reference engine, `--top-k` / `--temp` do not change them
+
+Example usage:
+
+```sh
+llama-tts -m maya2-native.gguf     -mm mmproj-maya2-native.gguf     -p "{Vaidehi}: Hello world"     --tts-lang en     --output out.wav
+```
+
+**Note for GGUF conversion:**
+
+The checkpoint does not contain the Mimi decoder, the `--mmproj` conversion fetches it from `kyutai/mimi` (a pinned revision) through `huggingface_hub`:
+
+```sh
+python convert_hf_to_gguf.py path/to/maya2-native --outfile maya2-native.gguf
+python convert_hf_to_gguf.py path/to/maya2-native --mmproj --outfile mmproj-maya2-native.gguf
+```

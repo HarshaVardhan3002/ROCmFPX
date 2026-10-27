@@ -300,6 +300,17 @@
 #define TN_A_GEN_WAV_SEANET_RES_CONV2  "a.gen.wav.seanet.blk.%d.res_conv2.%s"
 #define TN_A_GEN_WAV_SEANET_SCALE_CONV "a.gen.wav.seanet.blk.%d.scale_conv.%s"
 
+// maya2 depth decoder and frame feedback
+#define TN_A_GEN_AUDIO_EMBD      "a.gen.audio_embd.%s"
+#define TN_A_GEN_AUDIO_EMBD_NORM "a.gen.audio_embd_norm.%s"
+#define TN_A_GEN_DEPTH_IN_PROJ   "a.gen.depth.in_proj.%s"
+#define TN_A_GEN_DEPTH_CODE_LO   "a.gen.depth.code_lo.%s"
+#define TN_A_GEN_DEPTH_CODE_UP   "a.gen.depth.code_up.%s"
+#define TN_A_GEN_DEPTH_LEVEL_EMBD "a.gen.depth.level_embd.%s"
+#define TN_A_GEN_DEPTH_CROSS     "a.gen.depth.cross.%s"
+#define TN_A_GEN_DEPTH_NORM      "a.gen.depth.norm.%s"
+#define TN_A_GEN_DEPTH_HEAD      "a.gen.depth.head.%s"
+
 // cogvlm
 #define TN_MM_POST_FC_NORM "mm.post_fc_norm.%s"
 #define TN_MM_H_TO_4H      "mm.up.%s"
@@ -547,6 +558,7 @@ enum projector_type {
     PROJECTOR_TYPE_QWEN3TTS_GEN,
     PROJECTOR_TYPE_POCKETTTS_SPKENC,
     PROJECTOR_TYPE_POCKETTTS_GEN,
+    PROJECTOR_TYPE_MAYA2_GEN,
     PROJECTOR_TYPE_MUSE_GLIMMER,
     PROJECTOR_TYPE_SENSENOVA_U1,
     PROJECTOR_TYPE_COHERE2V,
@@ -623,6 +635,7 @@ static std::map<projector_type, std::string> PROJECTOR_TYPE_NAMES = {
     { PROJECTOR_TYPE_QWEN3TTS_GEN,      "qwen3tts_gen"},
     { PROJECTOR_TYPE_POCKETTTS_SPKENC,  "pockettts_spkenc"},
     { PROJECTOR_TYPE_POCKETTTS_GEN,     "pockettts_gen"},
+    { PROJECTOR_TYPE_MAYA2_GEN,         "maya2_gen"},
     { PROJECTOR_TYPE_MUSE_GLIMMER,      "muse-glimmer"},
     { PROJECTOR_TYPE_SENSENOVA_U1,      "sensenova_u1"},
     { PROJECTOR_TYPE_COHERE2V,          "cohere2v"},

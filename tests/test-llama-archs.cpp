@@ -913,6 +913,9 @@ static bool arch_supported(const llm_arch arch) {
     if (arch == LLM_ARCH_CLEF || arch == LLM_ARCH_VLLM_DECISION2) {
         return false; // TODO decision head tensors
     }
+    if (arch == LLM_ARCH_MAYA2) {
+        return false; // TODO the cb0 head is smaller than the vocab
+    }
     if (arch == LLM_ARCH_DEEPSEEK2OCR) {
         return false;
     }
