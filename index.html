@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROCmFPX</title>
+<meta name="description" content="Low-bit LLMs for AMD GPUs and Strix Halo. First release: DeepSeek V4.1 Flash on one 128 GB machine. Tell us what to quantize next.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4f0; --panel: #ffffff; --ink: #1b1a19; --muted: #5d5a55; --line: #dedad3;
+  --accent: #c8102e; --accent-ink: #ffffff; --a: #c8102e; --b: #1f6f8b; --note-bg: #fff6e5; --note-line: #e8c37a;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121212; --panel: #1b1b1b; --ink: #ecebe8; --muted: #a8a49d; --line: #2e2d2b;
+    --accent: #ff4d5e; --accent-ink: #121212; --a: #ff4d5e; --b: #4fb3d4; --note-bg: #2a2214; --note-line: #6b5426;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.6 "IBM Plex Sans", system-ui, sans-serif; }
+a { color: var(--accent); }
+.wrap { max-width: 860px; margin: 0 auto; padding: 0 16px; }
+header { border-bottom: 1px solid var(--line); }
+header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+.brand { font: 600 18px "IBM Plex Mono", monospace; letter-spacing: .02em; color: var(--ink); text-decoration: none; }
+.brand span { color: var(--accent); }
+nav a { margin-left: 18px; color: var(--muted); text-decoration: none; font-size: 15px; }
+nav a:first-child { margin-left: 0; }
+nav a:hover { color: var(--ink); }
+.hero { padding: 56px 0 32px; }
+.kicker { font: 600 13px "IBM Plex Mono", monospace; text-transform: uppercase; letter-spacing: .12em; color: var(--accent); margin: 0 0 10px; }
+h1 { font-size: clamp(30px, 6vw, 48px); line-height: 1.1; margin: 0 0 18px; letter-spacing: -.02em; }
+.lede { font-size: 19px; color: var(--muted); max-width: 680px; margin: 0; }
+section { padding: 28px 0; }
+h2 { font-size: 24px; margin: 0 0 12px; letter-spacing: -.01em; }
+p { margin: 0 0 14px; }
+.note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 10px; padding: 18px 20px; }
+.note p:last-child { margin-bottom: 0; }
+.models { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+.card h3 { margin: 0 0 6px; font-size: 17px; }
+.card p { color: var(--muted); font-size: 15px; margin: 0 0 10px; }
+.tag { display: inline-block; font: 600 12px "IBM Plex Mono", monospace; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.tag.live { border-color: var(--accent); color: var(--accent); }
+.poll { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+@media (max-width: 640px) { .poll { grid-template-columns: 1fr; } }
+.opt { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; }
+.opt h3 { margin: 0 0 6px; font-size: 19px; }
+.opt p { color: var(--muted); font-size: 15px; flex: 1; }
+.count { font: 600 34px "IBM Plex Mono", monospace; margin: 4px 0 2px; }
+.bar { height: 8px; background: var(--line); border-radius: 99px; overflow: hidden; margin: 6px 0 16px; }
+.bar i { display: block; height: 100%; width: 0; transition: width .6s ease; }
+#optA .bar i { background: var(--a); } #optB .bar i { background: var(--b); }
+.btn { display: inline-block; text-align: center; font: 600 15px "IBM Plex Sans", sans-serif; text-decoration: none; padding: 11px 16px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); border: 0; }
+.btn.alt { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn:hover { filter: brightness(1.08); }
+.small { font-size: 14px; color: var(--muted); }
+ul { padding-left: 20px; margin: 0 0 14px; }
+li { margin-bottom: 6px; }
+code { font: 14px "IBM Plex Mono", monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+.support { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+footer { border-top: 1px solid var(--line); margin-top: 32px; padding: 22px 0 40px; color: var(--muted); font-size: 14px; }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="./">ROCm<span>FPX</span></a>
+    <nav>
+      <a href="#poll">Poll</a>
+      <a href="https://github.com/HarshaVardhan3002/ROCmFPX">GitHub</a>
+      <a href="https://huggingface.co/Harsha001">Models</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <p class="kicker">Low-bit LLMs for AMD GPUs</p>
+    <h1>Frontier-size models on one 128 GB Strix Halo machine</h1>
+    <p class="lede">ROCmFPX is a llama.cpp fork tuned for AMD GPUs, especially the Ryzen AI Max+ 395 (Strix Halo). The goal: run the big open models at home, at a quality you can actually use.</p>
+  </div>
+
+  <section>
+    <div class="note">
+      <p><strong>This is a first iteration.</strong> The current releases fit big models into 128 GB by removing the least-used experts and using existing 1 to 2 bit quantizations. That works, but it costs quality.</p>
+      <p>We are actively working on new ROCmFPX formats at around <strong>2.1 bits per weight and below 2 bits</strong> that keep much more of the original quality and run fast on AMD GPUs. This will take time, and we need the community's help: testing on real hardware, reporting results, and telling us which models matter to you.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Releases</h2>
+    <div class="models">
+      <div class="card">
+        <span class="tag live">available</span>
+        <h3>DeepSeek V4.1 Flash for Strix Halo</h3>
+        <p>About 97 GiB on the GPU, Engram table read from the SSD. Community test release.</p>
+        <a href="https://huggingface.co/Harsha001/DeepSeek-V4.1-Flash-1017-StrixHalo-GGUF">Hugging Face</a>
+      </div>
+      <div class="card">
+        <span class="tag">in progress</span>
+        <h3>MiniMax M3.1 Flash for Strix Halo</h3>
+        <p>428B MoE, cut to fit 128 GB with room for a 64K context. Building and checking now.</p>
+        <a href="https://huggingface.co/Harsha001">Follow on Hugging Face</a>
+      </div>
+      <div class="card">
+        <span class="tag">research</span>
+        <h3>New ROCmFPX low-bit formats</h3>
+        <p>About 2.1 bits per weight and below, built for AMD kernels. Early work.</p>
+        <a href="https://github.com/HarshaVardhan3002/ROCmFPX">Watch the repository</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="poll">
+    <h2>What should we quantize next?</h2>
+    <p>Pick the one you care about more. Voting is a 👍 on GitHub, so you need a GitHub account, and each account counts once per option.</p>
+    <div class="poll">
+      <div class="opt" id="optA">
+        <h3>Big models, squeezed to fit</h3>
+        <p>Frontier-size MoE models (DeepSeek, MiniMax, GLM, big Qwen) cut and quantized to 1 to 2 bits so they run in 128 GB. More knowledge, some quality loss, lower speed.</p>
+        <div class="count" data-n>–</div>
+        <div class="bar"><i></i></div>
+        <a class="btn" href="https://github.com/HarshaVardhan3002/ROCmFPX/issues/1#issuecomment-6437562844">I'm interested: vote on GitHub</a>
+      </div>
+      <div class="opt" id="optB">
+        <h3>Smaller models, done well</h3>
+        <p>Models that already fit (up to about 120B) at 4 to 8 bits, with the best quality and speed on AMD.</p>
+        <div class="count" data-n>–</div>
+        <div class="bar"><i></i></div>
+        <a class="btn" href="https://github.com/HarshaVardhan3002/ROCmFPX/issues/1#issuecomment-6437563098">I'm interested: vote on GitHub</a>
+      </div>
+    </div>
+    <p class="small" id="pollStatus" style="margin-top:12px">Loading live counts…</p>
+    <p class="small">Want a specific model? <a href="https://github.com/HarshaVardhan3002/ROCmFPX/issues/1">Reply on the poll</a> with its Hugging Face link.</p>
+  </section>
+
+  <section>
+    <h2>How you can help</h2>
+    <ul>
+      <li><strong>Run a release on your AMD machine</strong> and post what you see: speed (<code>llama-bench</code> output), memory use, and whether the answers are good. Use the Community tab of the model on Hugging Face or a GitHub issue.</li>
+      <li><strong>Tell us your hardware</strong>: Strix Halo, Radeon RX 7000 / 9000, Instinct, Windows or Linux, Vulkan or ROCm.</li>
+      <li><strong>Vote above</strong>, so the next months go to the models you actually want.</li>
+    </ul>
+  </section>
+
+  <section id="support" hidden>
+    <h2>Support the work</h2>
+    <p>Quantizing a 400B+ model takes days of machine time and a lot of disk. If these releases are useful to you, a coffee helps.</p>
+    <div class="support">
+      <a class="btn" id="bmc" href="#">☕ Buy me a coffee</a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Built on <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>. The DeepSeek release uses IST-DASLab's GSQ and RCO expert quantization; the MiniMax work starts from Unsloth's GGUF files. Model weights keep their original licenses.</p>
+    <p>ROCmFPX is an independent community project and is not affiliated with AMD.</p>
+  </div>
+</footer>
+
+<script>
+// Buy Me a Coffee link: the section stays hidden until this is set.
+const BMC_URL = "";
+if (BMC_URL) {
+  document.getElementById("bmc").href = BMC_URL;
+  document.getElementById("support").hidden = false;
+}
+
+// Live poll counts: 👍 reactions on the two option comments of issue #1.
+const API = "https://api.github.com/repos/HarshaVardhan3002/ROCmFPX/issues/comments/";
+const OPTS = { optA: 6437562844, optB: 6437563098 };
+(async () => {
+  const status = document.getElementById("pollStatus");
+  try {
+    const n = {};
+    for (const [id, cid] of Object.entries(OPTS)) {
+      const r = await fetch(API + cid, { headers: { Accept: "application/vnd.github+json" } });
+      if (!r.ok) throw new Error(r.status);
+      n[id] = (await r.json()).reactions["+1"] || 0;
+    }
+    const total = n.optA + n.optB;
+    for (const id of Object.keys(OPTS)) {
+      const el = document.getElementById(id);
+      const pct = total ? Math.round(100 * n[id] / total) : 0;
+      el.querySelector("[data-n]").textContent = n[id] + (n[id] === 1 ? " vote" : " votes");
+      el.querySelector(".bar i").style.width = pct + "%";
+    }
+    status.textContent = total ? total + " votes so far. Counts update when you reload." : "No votes yet. Be the first.";
+  } catch (e) {
+    status.innerHTML = 'Could not load the live counts right now. <a href="https://github.com/HarshaVardhan3002/ROCmFPX/issues/1">See them on GitHub</a>.';
+  }
+})();
+</script>
+</body>
+</html>
