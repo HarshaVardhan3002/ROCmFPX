@@ -10,8 +10,9 @@ void llama_model_clover_moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
 
-    ml.get_key(LLM_KV_CLOVER_CORESET_ENABLED, hparams.clover_coreset);
-    ml.get_key(LLM_KV_CLOVER_CORESET_TOP_P,   hparams.clover_coreset_top_p);
+    // optional: written by conversion/clover.py; defaults (off, 0.9) keep test-llama-archs dummy models loadable
+    ml.get_key(LLM_KV_CLOVER_CORESET_ENABLED, hparams.clover_coreset, false);
+    ml.get_key(LLM_KV_CLOVER_CORESET_TOP_P,   hparams.clover_coreset_top_p, false);
 
     // Load linear attention (gated delta net) parameters
     ml.get_key(LLM_KV_SSM_CONV_KERNEL,    hparams.ssm_d_conv);
