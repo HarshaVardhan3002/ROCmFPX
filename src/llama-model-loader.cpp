@@ -1216,6 +1216,17 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             size_data -= nbytes;
             n_created++;
 
+            // the optional ".scale" companion of a skipped weight (ROCmFPX tensor scale, NVFP4 scale2) is unused too,
+            // e.g. for an MTP layer that is not loaded
+            const std::string name = tn.str();
+            if (name.size() > 7 && name.compare(name.size() - 7, 7, ".weight") == 0) {
+                const std::string name_s = name.substr(0, name.size() - 7) + ".scale";
+                if (const ggml_tensor * t_s = get_tensor_meta(name_s.c_str())) {
+                    size_data -= ggml_nbytes(t_s);
+                    n_created++;
+                }
+            }
+
             return nullptr;
         }
 
