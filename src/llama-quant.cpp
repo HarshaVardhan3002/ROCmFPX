@@ -268,7 +268,7 @@ static int rocmfpx_qmax_log2(ggml_type type) {
 
 // weights whose ".scale" is loaded by the generic pass in llama_model::load_tensors and applied by build_lora_mm(_id)
 static bool rocmfpx_tensor_scale_supported(const std::string & name) {
-    static const std::regex pattern(R"(^(output|blk\.\d+\.(attn_(q|k|v|qkv|output)|ffn_(gate|up|down)(_exps|_shexp)?))\.weight$)");
+    static const std::regex pattern(R"(^(output|blk\.\d+\.(attn_(q|k|v|qkv|output)|ffn_(gate|up|down)(_exps|_shexp)?|shortconv\.(in_proj|out_proj)))\.weight$)");
     return std::regex_match(name, pattern);
 }
 

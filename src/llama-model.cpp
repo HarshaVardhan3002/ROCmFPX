@@ -1747,6 +1747,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 layer.wqkv_gate_s = create_tensor(tn(LLM_TENSOR_ATTN_GATE, "scale", i), {1}, TENSOR_NOT_REQUIRED);
             }
 
+            // short convolution projection scales (LFM2/LFM3, per-tensor, shape {1})
+            if (!layer.shortconv.in_proj_s && layer.shortconv.in_proj) {
+                layer.shortconv.in_proj_s = create_tensor(tn(LLM_TENSOR_SHORTCONV_INPROJ, "scale", i), {1}, TENSOR_NOT_REQUIRED);
+            }
+            if (!layer.shortconv.out_proj_s && layer.shortconv.out_proj) {
+                layer.shortconv.out_proj_s = create_tensor(tn(LLM_TENSOR_SHORTCONV_OUTPROJ, "scale", i), {1}, TENSOR_NOT_REQUIRED);
+            }
+
             // dense FFN weight scales (per-tensor, shape {1})
             if (!layer.ffn_gate_s && layer.ffn_gate) {
                 layer.ffn_gate_s = create_tensor(tn(LLM_TENSOR_FFN_GATE, "scale", i), {1}, TENSOR_NOT_REQUIRED);

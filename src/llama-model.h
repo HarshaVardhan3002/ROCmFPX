@@ -223,6 +223,10 @@ struct llama_layer_shortconv {
     struct ggml_tensor * in_proj  = nullptr;
     struct ggml_tensor * conv     = nullptr;
     struct ggml_tensor * out_proj = nullptr;
+
+    // optional per-tensor scales (ROCmFPX tensor scale)
+    struct ggml_tensor * in_proj_s  = nullptr;
+    struct ggml_tensor * out_proj_s = nullptr;
 };
 
 struct llama_layer_nextn {
