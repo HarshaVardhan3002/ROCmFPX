@@ -84,3 +84,28 @@ The checkpoint does not contain the Mimi decoder, the `--mmproj` conversion fetc
 python convert_hf_to_gguf.py path/to/maya2-native --outfile maya2-native.gguf
 python convert_hf_to_gguf.py path/to/maya2-native --mmproj --outfile mmproj-maya2-native.gguf
 ```
+
+## Audio8
+
+[Edge0/Audio8-TTS-Realistic-0.6b](https://huggingface.co/Edge0/Audio8-TTS-Realistic-0.6b): a dual AR model. A Qwen2-like slow AR picks the semantic token of each 21.5 Hz frame, a 4 layer fast AR predicts codebooks 1..9, and the arktts codec decoder turns the 10 codes into 44.1 kHz audio. The slow AR is a plain `llama` GGUF, the fast AR and the codec live in the mmproj.
+
+Available params:
+- the text language is not selected, write the prompt in the language you want spoken
+- `--tts-speaker-file` and `--tts-lang` are not used
+- sampling follows the reference: top-k 50, top-p 0.9, temperature 0.7, RAS (window 10, top-p 0.9, temperature 1.0) for the semantic token; `--top-k` / `--temp` do not change it
+- at most 1024 frames (about 47 s) per call
+
+Example usage:
+
+```sh
+llama-tts -m audio8.gguf -mm mmproj-audio8.gguf -p "Hello world" --output out.wav
+```
+
+**Note for GGUF conversion:**
+
+The `--mmproj` conversion reads the codec from `codec.pth` in the model directory:
+
+```sh
+python convert_hf_to_gguf.py path/to/Audio8-TTS-Realistic-0.6b --outfile audio8.gguf
+python convert_hf_to_gguf.py path/to/Audio8-TTS-Realistic-0.6b --mmproj --outfile mmproj-audio8.gguf
+```

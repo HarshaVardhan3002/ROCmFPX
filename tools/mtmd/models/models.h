@@ -454,6 +454,33 @@ std::vector<c2w_state_slot> list_c2w_state_slots(const clip_hparams & hparams, c
 // same, for the streaming mimi decoder (pocket-tts GEN_WAV)
 std::vector<c2w_state_slot> list_pockettts_state_slots(const clip_hparams & hparams, const clip_model & model);
 
+//
+// audio8 (arktts) generation:
+// GEN_CODE = fast AR, slow AR hidden state + code 0 -> codes 1..9 + the next slow AR input
+// GEN_WAV  = arktts codec decoder, a window of 10-code frames -> 44.1 kHz PCM
+//
+struct clip_graph_audio8_gen : clip_graph {
+    clip_graph_audio8_gen(clip_ctx * ctx, const clip_image_f32 & img, clip_gen_process_type gen_process,
+                          int n_frames, int top_k, float top_p, float temp)
+        : clip_graph(ctx, img), gen_process(gen_process), n_frames(n_frames), top_k(top_k), top_p(top_p), temp(temp) {}
+    ggml_cgraph * build() override;
+
+    static constexpr int n_q = 10; // codebooks per frame
+
+    clip_gen_process_type gen_process;
+    int   n_frames; // GEN_WAV only
+    int   top_k;    // GEN_CODE only
+    float top_p;    // GEN_CODE only
+    float temp;     // GEN_CODE only
+
+    ggml_tensor * fast_forward(ggml_tensor * x) const;
+    ggml_tensor * sample(ggml_tensor * logits, ggml_tensor * inp_rand) const;
+    ggml_tensor * wav_decode(clip_graph_qwen3tts_gen::code2wav & c2w, ggml_tensor * inp_codes) const;
+};
+
+// code2wav state of the audio8 codec decoder, see audio8-gen.cpp
+std::vector<c2w_state_slot> list_audio8_state_slots(const clip_hparams & hparams, const clip_model & model);
+
 struct clip_graph_kimik25 : clip_graph {
     clip_graph_kimik25(clip_ctx * ctx, const clip_image_f32 & img) : clip_graph(ctx, img) {}
     ggml_cgraph * build() override;

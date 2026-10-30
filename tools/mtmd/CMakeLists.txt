@@ -69,6 +69,7 @@ add_library(mtmd
             models/pockettts-spkenc.cpp
             models/pockettts-gen.cpp
             models/maya2-gen.cpp
+            models/audio8-gen.cpp
             models/step3vl.cpp
             models/siglip.cpp
             models/whisper-enc.cpp

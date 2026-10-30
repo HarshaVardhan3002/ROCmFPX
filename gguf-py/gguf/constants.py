@@ -6657,6 +6657,7 @@ class VisionProjectorType:
     POCKETTTS_SPKENC = "pockettts_spkenc" # audio: mimi encoder as voice-prompt encoder
     POCKETTTS_GEN = "pockettts_gen" # audio generation: flow-matching decoder + mimi decoder
     MAYA2_GEN = "maya2_gen" # audio generation: depth decoder + mimi decoder
+    AUDIO8_GEN = "audio8_gen" # audio generation: fast AR + arktts codec decoder
     HUNYUANVL      = "hunyuanvl"
     PARAKEET       = "parakeet"  # audio
     MINIMAXM3      = "minimax_m3"

@@ -421,6 +421,7 @@ enum mtmd_gen_audio_type {
     MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
     MTMD_GEN_AUDIO_TYPE_POCKETTTS,
     MTMD_GEN_AUDIO_TYPE_MAYA2,
+    MTMD_GEN_AUDIO_TYPE_AUDIO8,
 };
 
 struct mtmd_gen_audio_info {
@@ -451,7 +452,7 @@ struct mtmd_gen_inp {
 
     // for MTMD_GEN_PROCESS_TYPE_GEN_WAV
     // pass either codes (discrete) or feats (continuous), depending on the pipeline
-    // maya2 GEN_CODE also takes optional codes: one frame, a code >= 0 replaces the sampled one at its level
+    // maya2/audio8 GEN_CODE also take optional codes: one frame, a code >= 0 replaces the sampled one at its level
     int32_t * codes;
     size_t    n_codes;
     const float * feats;
