@@ -1211,17 +1211,19 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         // skip unused tensors
         if (info.op == GGML_OP_NONE || (flags & TENSOR_SKIP)) {
             const size_t nbytes = ggml_nbytes(t_meta);
-            LLAMA_LOG_WARN("model has unused tensor %s (size = %zu bytes) -- ignoring\n", tn.str().c_str(), nbytes);
-
-            size_data -= nbytes;
-            n_created++;
+            const std::string name = tn.str();
+            if (skipped_counted.insert(name).second) {
+                LLAMA_LOG_WARN("model has unused tensor %s (size = %zu bytes) -- ignoring\n", name.c_str(), nbytes);
+                size_data -= nbytes;
+                n_created++;
+            }
 
             // the optional ".scale" companion of a skipped weight (ROCmFPX tensor scale, NVFP4 scale2) is unused too,
-            // e.g. for an MTP layer that is not loaded
-            const std::string name = tn.str();
+            // e.g. for an MTP layer that is not loaded; some archs also request it explicitly, so count it once
             if (name.size() > 7 && name.compare(name.size() - 7, 7, ".weight") == 0) {
                 const std::string name_s = name.substr(0, name.size() - 7) + ".scale";
-                if (const ggml_tensor * t_s = get_tensor_meta(name_s.c_str())) {
+                const ggml_tensor * t_s = get_tensor_meta(name_s.c_str());
+                if (t_s && skipped_counted.insert(name_s).second) {
                     size_data -= ggml_nbytes(t_s);
                     n_created++;
                 }

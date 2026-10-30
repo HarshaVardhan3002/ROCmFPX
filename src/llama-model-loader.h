@@ -73,6 +73,9 @@ struct llama_model_loader {
     int n_tensors = 0;
     int n_created = 0;
 
+    // skipped tensors already counted in n_created (a skipped .scale can be reached twice)
+    std::set<std::string> skipped_counted;
+
     uint64_t n_elements = 0;
     size_t   n_bytes    = 0;
 
