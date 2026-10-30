@@ -12510,6 +12510,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // DeepSeek-V4.1 prefill gather: one query per stream, 64 heads on one 512-wide K=V head, window + top-k rows
+    for (int64_t n_q : {1, 3}) {
+        test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, n_q}, 768, 1, true, true, 0, 0, GGML_PREC_F32,
+                                                        GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, false, true));
+    }
     return test_cases;
 }
 #ifdef _MSC_VER
@@ -12519,6 +12524,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    // DeepSeek-V4.1 prompt processing at depth: raw window (128 + ubatch, padded to 768) + n_comp compressed rows,
+    // 64 heads sharing one 512-wide K=V head, 512 queries per ubatch; the indexer (32 heads) picks the top 512 rows
+    for (int64_t n_comp : {4096, 8192, 16384, 32768, 65536}) {
+        for (int64_t n_kv_max : {0, 128 + 512}) {
+            test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, 1}, 768 + n_comp, 512, true, true, 0, 0, GGML_PREC_F32,
+                                                            GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true, n_kv_max));
+        }
+        test_cases.emplace_back(new test_lightning_indexer(128, 32, n_comp, 512, 1, 1, GGML_TYPE_F16));
+        test_cases.emplace_back(new test_top_k(GGML_TYPE_F32, {n_comp, 512, 1, 1}, 512));
+    }
+    // the prefill gather of the same: 170 queries per chunk, 768 rows each
+    test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, {64, 170}, 768, 1, true, true, 0, 0, GGML_PREC_F32,
+                                                    GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, false, true));
 
     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
     // note: same bytes either way, so a backend that indexes them differently shows it here

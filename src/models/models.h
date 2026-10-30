@@ -1558,6 +1558,11 @@ struct llama_model_deepseek41 : public llama_model_deepseek4 {
         // the mask per top-k source (one input copy per split)
         std::map<std::pair<int32_t, int32_t>, ggml_tensor *> gather_k_of;
         std::map<int32_t, ggml_tensor *> gather_mask_of;
+        // prefill gather on devices without sparse FA (all but NVIDIA CUDA; LLAMA_DSV41_PREFILL_GATHER=0/1 forces):
+        // each query attends its window rows and its top-k rows only, in query chunks
+        std::vector<bool> prefill_gather_of; // [n_layer]
+        std::map<ggml_tensor *, ggml_tensor *> win_idx_of;     // raw mask -> visible window cells per query
+        std::map<int32_t, ggml_tensor *>       prefill_mask_of; // per top-k source
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;

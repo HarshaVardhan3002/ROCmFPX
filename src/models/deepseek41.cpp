@@ -661,6 +661,15 @@ ggml_tensor * llama_model_deepseek41::graph::build_attention41(
         const bool gather = sparse && cparams.flash_attn && raw_mask->type == GGML_TYPE_F16 && ci.kq_mask->type == GGML_TYPE_F16 &&
                 ((n_stream == 1 && nt <= 32) || nt == n_stream);
 
+        // longer single-stream ubatches on devices without sparse FA: the same gather in query chunks, with each
+        // query's window cells gathered too. D=512 FA wants the K length a multiple of 256
+        const int64_t n_kv_sel = GGML_PAD(std::min<int64_t>(n_raw, hparams.n_swa) + k_sel, 256);
+        const int64_t k_win    = n_kv_sel - k_sel;
+        const bool prefill_gather = !gather && sparse && prefill_gather_of[il] && cparams.flash_attn && n_stream == 1 &&
+                raw_mask->type == GGML_TYPE_F16 && ci.kq_mask->type == GGML_TYPE_F16 &&
+                raw_mask->ne[0] == n_raw && raw_mask->ne[1] == nt && ci.kq_mask->ne[1] == nt &&
+                k_win <= n_raw && n_kv_sel < n_raw + n_comp;
+
         if (gather) {
             // built once per (storage, top-k) pair
             ggml_tensor *& comp_k = gather_k_of[{rd, topk_src}];
@@ -715,6 +724,64 @@ ggml_tensor * llama_model_deepseek41::graph::build_attention41(
             }
 
             out = build_attn_mha(q, k_all, k_all, nullptr, kq_mask, layer.attn_sinks, nullptr, 0, kq_scale, il);
+        } else if (prefill_gather) {
+            // window cells visible to each query (at most n_swa; padded with masked cells), one set per raw mask
+            ggml_tensor *& win_idx = win_idx_of[raw_mask];
+            if (!win_idx) {
+                win_idx = ggml_top_k(ctx0, ggml_cast(ctx0, raw_mask, GGML_TYPE_F32), k_win);
+                cb(win_idx, "win_idx", il);
+            }
+
+            // mask: window cells, then comp mask at the selected rows; one per top-k source
+            ggml_tensor *& kq_mask = prefill_mask_of[topk_src];
+            if (!kq_mask) {
+                ggml_tensor * win_mask = ggml_get_rows(ctx0, ggml_reshape_3d(ctx0, raw_mask, 1, n_raw, nt), win_idx);
+                ggml_tensor * sel_mask = ggml_get_rows(ctx0, ggml_reshape_3d(ctx0, ci.kq_mask, 1, n_comp, nt),
+                        ggml_reshape_2d(ctx0, top_k, k_sel, nt));
+                kq_mask = ggml_concat(ctx0, ggml_reshape_4d(ctx0, win_mask, k_win, 1, 1, nt),
+                                            ggml_reshape_4d(ctx0, sel_mask, k_sel, 1, 1, nt), 0);
+                kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
+                cb(kq_mask, "prefill_kq_mask", il);
+            }
+
+            // gathered K is F32 [n_embd_head, n_kv_sel] per query: chunk queries to ~256 MiB of it
+            const int64_t chunk = std::max<int64_t>(1, (INT64_C(1) << 26)/(n_kv_sel*n_embd_head));
+            ggml_tensor * win_src  = ggml_view_2d(ctx0, raw_k, n_embd_head, n_raw, raw_k->nb[2], 0);
+            ggml_tensor * comp_src = ggml_view_2d(ctx0, comp_all, n_embd_head, n_comp, comp_all->nb[2], 0);
+            ggml_tensor * top_k_2d = ggml_reshape_2d(ctx0, top_k, k_sel, nt);
+            std::vector<ggml_tensor *> parts;
+            for (int64_t t0 = 0; t0 < nt; t0 += chunk) {
+                const int64_t c = std::min(chunk, nt - t0);
+                ggml_tensor * wk = ggml_get_rows(ctx0, win_src,
+                        ggml_view_1d(ctx0, win_idx, k_win*c, t0*win_idx->nb[1]));
+                ggml_tensor * ck = ggml_get_rows(ctx0, comp_src,
+                        ggml_view_1d(ctx0, top_k_2d, k_sel*c, t0*top_k_2d->nb[1]));
+                ck = ggml_reshape_4d(ctx0, ck, n_embd_head, 1, k_sel, c);
+                if (k_rot) {
+                    // the window is stored rotated, the compressed rows are not
+                    ck = llama_mul_mat_hadamard(ctx0, ck, k_rot);
+                }
+                ggml_tensor * k_c = ggml_concat(ctx0, ggml_reshape_4d(ctx0, wk, n_embd_head, 1, k_win, c), ck, 2);
+                if (raw_k->type != GGML_TYPE_F32) {
+                    k_c = ggml_cast(ctx0, k_c, raw_k->type); // exact: rows are raw_k->type values
+                }
+                cb(k_c, "prefill_k_sel", il);
+
+                ggml_tensor * q_c = ggml_view_3d(ctx0, q, q->ne[0], q->ne[1], c, q->nb[1], q->nb[2], t0*q->nb[2]);
+                ggml_tensor * m_c = ggml_view_4d(ctx0, kq_mask, n_kv_sel, 1, 1, c,
+                        kq_mask->nb[1], kq_mask->nb[2], kq_mask->nb[3], t0*kq_mask->nb[3]);
+                ggml_tensor * o_c = build_attn_mha(q_c, k_c, k_c, nullptr, m_c, layer.attn_sinks, nullptr, 0, kq_scale, il);
+                parts.push_back(o_c);
+            }
+            // balanced concats: each output row is copied log2(chunks) times, not once per later chunk
+            while (parts.size() > 1) {
+                std::vector<ggml_tensor *> w;
+                for (size_t i = 0; i < parts.size(); i += 2) {
+                    w.push_back(i + 1 < parts.size() ? ggml_concat(ctx0, parts[i], parts[i + 1], 1) : parts[i]);
+                }
+                parts.swap(w);
+            }
+            out = parts[0];
         } else {
             // dense attention over [window | all compressed rows], selection applied as a mask
             ggml_tensor * comp_k = ggml_view_4d(ctx0, comp_all, n_embd_head, 1, n_comp, n_stream,
@@ -773,6 +840,19 @@ llama_model_deepseek41::graph::graph(const llama_model & model_base, const llm_g
 
     static const bool sparse_env = dsv41_env_on("LLAMA_DSV41_SPARSE");
     sparse = sparse_env;
+
+    static const char * prefill_gather_env = getenv("LLAMA_DSV41_PREFILL_GATHER");
+    prefill_gather_of.assign(n_layer, false);
+    for (int il = 0; il < n_layer; ++il) {
+        if (prefill_gather_env) {
+            prefill_gather_of[il] = atoi(prefill_gather_env) != 0;
+            continue;
+        }
+        ggml_backend_dev_t dev = model.dev_layer(il);
+        const enum ggml_backend_dev_type type = dev ? ggml_backend_dev_type(dev) : GGML_BACKEND_DEVICE_TYPE_CPU;
+        prefill_gather_of[il] = (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) &&
+                strncmp(ggml_backend_dev_name(dev), "CUDA", 4) != 0;
+    }
 
     topk_of.assign(n_layer, nullptr);
     comp_row_of.assign(n_layer, nullptr);
