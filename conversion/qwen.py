@@ -876,6 +876,9 @@ class DFlashModel(Qwen3Model):
             self.gguf_writer.add_sliding_window(sliding_window)
             self.gguf_writer.add_sliding_window_pattern(is_swa)
 
+        if no_rope_layers := self.hparams.get("no_rope_layers"):
+            self.gguf_writer.add_rope_pattern([i not in no_rope_layers for i in range(self.block_count)])
+
         causal = self.hparams.get("is_causal")
         if causal is None:
             causal = dflash_config.get("causal")

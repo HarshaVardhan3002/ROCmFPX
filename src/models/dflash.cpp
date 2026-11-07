@@ -121,6 +121,9 @@ void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
         hparams.rope_freq_scale_train_swa = hparams.rope_freq_scale_train;
     }
 
+    // optional per-layer rope on/off (DFlash2 NoPE layers)
+    ml.get_arr(LLM_KV_ATTENTION_ROPE_PATTERN, hparams.rope_pattern, false);
+
     type = LLM_TYPE_UNKNOWN;
 }
 
@@ -880,7 +883,9 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
             if (shared_kv) {
                 Vcur = ggml_rms_norm(ctx0, Vcur, hparams.f_norm_rms_eps);
             }
-            Kcur = build_rope(Kcur, inp_pos);
+            if (hparams.rope_pattern[il]) {
+                Kcur = build_rope(Kcur, inp_pos);
+            }
             cb(Kcur, "Kcur_injected", il);
             cb(Vcur, "Vcur_injected", il);
 
@@ -987,8 +992,10 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
             Vcur = ggml_rms_norm(ctx0, Vcur, hparams.f_norm_rms_eps);
         }
 
-        Qcur = build_rope(Qcur, inp_pos);
-        Kcur = build_rope(Kcur, inp_pos);
+        if (hparams.rope_pattern[il]) {
+            Qcur = build_rope(Qcur, inp_pos);
+            Kcur = build_rope(Kcur, inp_pos);
+        }
         cb(Qcur, "Qcur", il);
         cb(Kcur, "Kcur", il);
         cb(Vcur, "Vcur", il);
