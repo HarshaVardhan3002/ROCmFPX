@@ -447,6 +447,10 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.attn_gate_proj",  # k2-horizon
         ),
 
+        MODEL_TENSOR.ATTN_VRES_LAMBDA: (
+            "model.layers.{bid}.self_attn.value_res_lambda",  # ricursive
+        ),
+
         # Feed-forward norm
         MODEL_TENSOR.FFN_NORM: (
             "model.lilicorr.layers.{bid}.mlp_norm",                          # lilicorr
