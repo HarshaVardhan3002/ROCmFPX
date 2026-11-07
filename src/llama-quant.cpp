@@ -267,9 +267,23 @@ static int rocmfpx_qmax_log2(ggml_type type) {
 }
 
 // weights whose ".scale" is loaded by the generic pass in llama_model::load_tensors and applied by build_lora_mm(_id)
-static bool rocmfpx_tensor_scale_supported(const std::string & name) {
+static bool rocmfpx_tensor_scale_supported(const std::string & name, llm_arch arch) {
     static const std::regex pattern(R"(^(output|blk\.\d+\.(attn_(q|k|v|qkv|output)|ffn_(gate|up|down)(_exps|_shexp)?|shortconv\.(in_proj|out_proj)))\.weight$)");
-    return std::regex_match(name, pattern);
+    if (std::regex_match(name, pattern)) {
+        return true;
+    }
+    // gated delta net projections: only these graphs pass the ".scale" of these weights to build_lora_mm
+    static const std::regex pattern_gdn(R"(^blk\.\d+\.(attn_gate|ssm_(out|alpha|beta))\.weight$)");
+    switch (arch) {
+        case LLM_ARCH_QWEN35:
+        case LLM_ARCH_QWEN35MOE:
+        case LLM_ARCH_CLEF:
+        case LLM_ARCH_CLOVER_MOE:
+        case LLM_ARCH_QWEN4EXP:
+            return std::regex_match(name, pattern_gdn);
+        default:
+            return false;
+    }
 }
 
 // histogram of block max_abs (blocks of 32) by binary exponent, one per expert
@@ -1659,7 +1673,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
         // the scale tensor ("blk.N.attn_q.weight" -> "blk.N.attn_q.scale") follows its weight in the output file
         if (rocmfpx_scale && metadata[i].allows_quantization && metadata[i].target_type != tensor->type &&
-            rocmfpx_qmax_log2(metadata[i].target_type) >= 0 && rocmfpx_tensor_scale_supported(metadata[i].name)) {
+            rocmfpx_qmax_log2(metadata[i].target_type) >= 0 && rocmfpx_tensor_scale_supported(metadata[i].name, model->arch)) {
             const std::string base = metadata[i].name.substr(0, metadata[i].name.size() - strlen("weight"));
             const std::string scale_name = base + "scale";
             // with a bias some graphs apply the scale after the bias, so leave those weights alone
