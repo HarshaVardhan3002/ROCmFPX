@@ -282,6 +282,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "RWKV6Qwen2ForCausalLM": "rwkv",
     "RWKV7ForCausalLM": "rwkv",
     "Raon1MiniForCausalLM": "raon",
+    "Raon1NanoForCausalLM": "raon1_nano",
     "RobertaForSequenceClassification": "bert",
     "RobertaModel": "bert",
     "RuGPT3XLForCausalLM": "gpt2",
