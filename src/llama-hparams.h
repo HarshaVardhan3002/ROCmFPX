@@ -265,6 +265,10 @@ struct llama_hparams {
     // output embedding dimension (0 = use n_embd)
     uint32_t n_embd_out_impl = 0;
 
+    // per-token width of the extracted layer inputs (0 = use n_embd)
+    // e.g. hyper-connection models carry hc_mult * n_embd residual streams
+    uint32_t n_embd_layer_inp_impl = 0;
+
     uint32_t dflash_block_size       = 0;
     uint32_t dflash_conv_kernel_size = 0;
     uint32_t dflash_conv_group_size  = 0;
@@ -472,6 +476,9 @@ struct llama_hparams {
 
     // dimension of output embeddings
     uint32_t n_embd_out() const;
+
+    // per-token width of the extracted layer inputs
+    uint32_t n_embd_layer_inp() const;
 
     // dimension of key/value embeddings for each head (per layer)
     uint32_t n_embd_head_k(uint32_t il = 0) const;
