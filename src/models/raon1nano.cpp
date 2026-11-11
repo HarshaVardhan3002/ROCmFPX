@@ -263,7 +263,7 @@ ggml_tensor * llama_model_raon1_nano::graph::build_rda_layer(
     const int64_t n_seqs       = ubatch.n_seqs;
 
     // wqkv rows: q | k | v | g (the output gate); the conv takes q | k | v
-    ggml_tensor * qkvg = build_lora_mm(layer.wqkv, cur);
+    ggml_tensor * qkvg = build_lora_mm(layer.wqkv, cur, layer.wqkv_s);
     ggml_tensor * qkv  = ggml_view_3d(ctx0, qkvg, 3*d_inner, n_seq_tokens, n_seqs,
             qkvg->nb[1], qkvg->nb[1]*n_seq_tokens, 0);
     ggml_tensor * conv_input = build_conv_state(inp_rs, inp_rs->mctx->get_r_l(il), qkv, hparams.ssm_d_conv, 3*d_inner, il);
@@ -311,7 +311,7 @@ ggml_tensor * llama_model_raon1_nano::graph::build_rda_layer(
     ggml_tensor * o = ggml_reshape_3d(ctx0, output, head_dim, n_head, n_tokens);
     ggml_tensor * gated = ggml_mul(ctx0, build_norm(o, layer.ssm_o_norm, nullptr, LLM_NORM_RMS, il), ggml_sigmoid(ctx0, g2));
 
-    cur = build_lora_mm(layer.wo, ggml_reshape_2d(ctx0, gated, d_inner, n_tokens));
+    cur = build_lora_mm(layer.wo, ggml_reshape_2d(ctx0, gated, d_inner, n_tokens), layer.wo_s);
     cb(cur, "rda_out", il);
 
     return cur;
@@ -345,7 +345,7 @@ ggml_tensor * llama_model_raon1_nano::graph::build_mla_layer(
             nullptr, nullptr, layer.wv_b, 1.0f/sqrtf(nk), il);
     out = ggml_mul(ctx0, out, ggml_sigmoid(ctx0, build_lora_mm(layer.wqkv_gate, cur)));
     cb(out, "mla_gated", il);
-    return build_lora_mm(layer.wo, out);
+    return build_lora_mm(layer.wo, out, layer.wo_s);
 }
 
 llama_model_raon1_nano::graph::graph(const llama_model & model, const llm_graph_params & params) : llm_build_delta_net_base(params) {
@@ -411,8 +411,8 @@ llama_model_raon1_nano::graph::graph(const llama_model & model, const llm_graph_
         cb(inp, "hc_attn_out", il);
         cur = build_hc_pre(inp, layer.hc_ffn_fn, layer.hc_ffn_base, layer.hc_ffn_chart, layer.ffn_norm, &post, &comb, il);
         cb(cur, "ffn_norm", il);
-        cur = build_ffn(cur, layer.ffn_up, nullptr, nullptr, nullptr, nullptr, nullptr,
-                layer.ffn_down, nullptr, nullptr, nullptr, LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
+        cur = build_ffn(cur, layer.ffn_up, nullptr, layer.ffn_up_s, nullptr, nullptr, nullptr,
+                layer.ffn_down, nullptr, layer.ffn_down_s, nullptr, LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
         inp = build_hc_post(inp, cur, post, comb, il);
 
         // per-layer input: streams += RMSNorm(proj(gelu_tanh(gate(stream sum)) * ple_il)), on every stream;
@@ -442,7 +442,7 @@ llama_model_raon1_nano::graph::graph(const llama_model & model, const llm_graph_
     }
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 }
@@ -493,9 +493,9 @@ llama_model_raon1_nano::graph_mtp::graph_mtp(const llama_model & model, const ll
     // the MTP SwiGLU output exceeds the F16 range (1e5 seen), which an F16 ffn_down turns into inf on backends
     // that round the activation to half (Metal); a power-of-two scale around ffn_down is exact
     const float ffn_scale = 64.0f;
-    cur = ggml_swiglu(ctx0, build_lora_mm(layer.ffn_up, cur));
+    cur = ggml_swiglu(ctx0, build_lora_mm(layer.ffn_up, cur, layer.ffn_up_s));
     cb(cur, "ffn_swiglu", il);
-    cur = build_lora_mm(layer.ffn_down, ggml_scale(ctx0, cur, 1.0f/ffn_scale));
+    cur = build_lora_mm(layer.ffn_down, ggml_scale(ctx0, cur, 1.0f/ffn_scale), layer.ffn_down_s);
     ggml_prec_set_acc(cur, GGML_PREC_F32);
     cur = ggml_scale(ctx0, cur, ffn_scale);
     cb(cur, "ffn_out", il);
@@ -516,7 +516,7 @@ llama_model_raon1_nano::graph_mtp::graph_mtp(const llama_model & model, const ll
     cb(cur_out, "result_norm", -1);
     res->t_embd = cur_out;
 
-    cur = build_lora_mm(model.output, cur_out);
+    cur = build_lora_mm(model.output, cur_out, model.output_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 }
