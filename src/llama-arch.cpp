@@ -174,6 +174,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_BEAM,             "beam"             },
     { LLM_ARCH_KOLIBRI1,         "kolibri1"         },
     { LLM_ARCH_RICURSIVE,        "ricursive"        },
+    { LLM_ARCH_INKLING2,         "inkling2"         },
     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
 };
 
@@ -426,6 +427,15 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_LILICORR_MLP_HIDDEN_SIZE,   "lilicorr.mlp_hidden_size"  },
 
     { LLM_KV_SHORTCONV_L_CACHE, "%s.shortconv.l_cache" },
+
+    { LLM_KV_INKLING_REL_EXTENT,        "%s.attention.rel_extent"          },
+    { LLM_KV_INKLING_REL_DIM,           "%s.attention.rel_dim"             },
+    { LLM_KV_INKLING_QK_CLIP,           "%s.attention.qk_l2_clip"          },
+    { LLM_KV_INKLING_REL_CLIP,          "%s.attention.rel_l2_clip"         },
+    { LLM_KV_INKLING_LOG_SCALING_ALPHA, "%s.attention.log_scaling_alpha"   },
+    { LLM_KV_INKLING_LOG_SCALING_FLOOR, "%s.attention.log_scaling_n_floor" },
+    { LLM_KV_INKLING_ATTN_RES_BLOCK,    "%s.attn_res.block_layers"         },
+    { LLM_KV_INKLING_CONV_KERNEL,       "%s.conv_kernel"                   },
     // sentence-transformers dense modules feature dims
     { LLM_KV_DENSE_2_FEAT_IN,        "%s.dense_2_feat_in"  },
     { LLM_KV_DENSE_2_FEAT_OUT,       "%s.dense_2_feat_out" },
@@ -768,6 +778,23 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_POS_NET_ATTN_V,                         "posnet.%d.attn_v" },
     { LLM_TENSOR_POS_NET_ATTN_OUT,                       "posnet.%d.attn_output" },
     { LLM_TENSOR_ATTN_SINKS,                             "blk.%d.attn_sinks" },
+    { LLM_TENSOR_ATTN_SINK_PROJ,                         "blk.%d.attn_sink_proj" },
+    { LLM_TENSOR_ATTN_REL,                               "blk.%d.attn_rel" },
+    { LLM_TENSOR_ATTN_REL_PROJ,                          "blk.%d.attn_rel_proj" },
+    { LLM_TENSOR_ATTN_Q_CLIP,                            "blk.%d.attn_q_clip" },
+    { LLM_TENSOR_ATTN_REL_CLIP,                          "blk.%d.attn_rel_clip" },
+    { LLM_TENSOR_ATTN_K_CONV,                            "blk.%d.attn_k_conv" },
+    { LLM_TENSOR_ATTN_V_CONV,                            "blk.%d.attn_v_conv" },
+    { LLM_TENSOR_ATTN_K_CONV_DYN,                        "blk.%d.attn_k_conv_dyn" },
+    { LLM_TENSOR_ATTN_V_CONV_DYN,                        "blk.%d.attn_v_conv_dyn" },
+    { LLM_TENSOR_ATTN_POST_CONV,                         "blk.%d.attn_post_conv" },
+    { LLM_TENSOR_FFN_POST_CONV,                          "blk.%d.ffn_post_conv" },
+    { LLM_TENSOR_ATTN_Q_IN_NORM,                         "blk.%d.attn_q_in_norm" },
+    { LLM_TENSOR_ATTN_K_IN_NORM,                         "blk.%d.attn_k_in_norm" },
+    { LLM_TENSOR_ATTN_V_IN_NORM,                         "blk.%d.attn_v_in_norm" },
+    { LLM_TENSOR_ATTN_RES_Q,                             "blk.%d.attn_res_q" },
+    { LLM_TENSOR_FFN_RES_Q,                              "blk.%d.ffn_res_q" },
+    { LLM_TENSOR_OUTPUT_RES_Q,                           "output_res_q" },
     { LLM_TENSOR_SHORTCONV_CONV,                         "blk.%d.shortconv.conv" },
     { LLM_TENSOR_SHORTCONV_INPROJ,                       "blk.%d.shortconv.in_proj" },
     { LLM_TENSOR_SHORTCONV_OUTPROJ,                      "blk.%d.shortconv.out_proj" },
@@ -928,6 +955,23 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_ATTN_K_B,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_V_B,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_SINKS,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SCALE}},
+    {LLM_TENSOR_ATTN_SINK_PROJ,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ATTN_REL,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ATTN_REL_PROJ,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ATTN_Q_CLIP,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ATTN_REL_CLIP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ATTN_K_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+    {LLM_TENSOR_ATTN_V_CONV,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+    {LLM_TENSOR_ATTN_K_CONV_DYN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ATTN_V_CONV_DYN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ATTN_POST_CONV,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+    {LLM_TENSOR_FFN_POST_CONV,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_SSM_CONV}},
+    {LLM_TENSOR_ATTN_Q_IN_NORM,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ATTN_K_IN_NORM,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ATTN_V_IN_NORM,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ATTN_RES_Q,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_FFN_RES_Q,                  {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_OUTPUT_RES_Q,               {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
     {LLM_TENSOR_DEC_ATTN_Q,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_DEC_ATTN_K,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_DEC_ATTN_V,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
@@ -1247,6 +1291,7 @@ bool llm_arch_is_recurrent(const llm_arch & arch) {
 
 bool llm_arch_is_hybrid(const llm_arch & arch) {
     switch (arch) {
+        case LLM_ARCH_INKLING2:
         case LLM_ARCH_JAMBA:
         case LLM_ARCH_FALCON_H1:
         case LLM_ARCH_PLAMO2:

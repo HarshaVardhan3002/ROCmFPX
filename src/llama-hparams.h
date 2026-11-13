@@ -223,6 +223,17 @@ struct llama_hparams {
     float    situ_beta            = 1.0f;
     float    situ_linear_beta     = 0.0f;   // 0 = no linear-beta transform on the up branch
 
+    // inkling2
+    uint32_t inkling_rel_extent     = 0;     // relative bias reach (backward distance), 0 = not inkling2
+    uint32_t inkling_rel_dim        = 0;     // d_rel
+    uint32_t inkling_conv_kernel    = 0;     // short conv taps (current token included)
+    uint32_t inkling_conv_channels  = 0;     // conv state channels per layer: k + v + attn out + ffn out
+    uint32_t inkling_attn_res_block = 0;     // layers per block attention residual
+    float    inkling_qk_clip        = 0.0f;  // L2 clip threshold of q and k head vectors
+    float    inkling_rel_clip       = 0.0f;  // L2 clip threshold of the relative states
+    float    inkling_log_alpha      = 0.0f;  // full-attention log scaling: 1 + alpha*log(max((pos+1)/floor, 1))
+    float    inkling_log_floor      = 1.0f;
+
     // hrm-text (looped H/L stacks)
     uint32_t n_hrm_layers_per_stack = 0;
     uint32_t n_hrm_h_cycles = 0;

@@ -179,6 +179,7 @@ enum llm_arch {
     LLM_ARCH_BEAM,
     LLM_ARCH_KOLIBRI1,
     LLM_ARCH_RICURSIVE,
+    LLM_ARCH_INKLING2,
     LLM_ARCH_UNKNOWN,
 };
 
@@ -473,6 +474,15 @@ enum llm_kv {
 
     LLM_KV_SHORTCONV_L_CACHE,
 
+    LLM_KV_INKLING_REL_EXTENT,
+    LLM_KV_INKLING_REL_DIM,
+    LLM_KV_INKLING_QK_CLIP,
+    LLM_KV_INKLING_REL_CLIP,
+    LLM_KV_INKLING_LOG_SCALING_ALPHA,
+    LLM_KV_INKLING_LOG_SCALING_FLOOR,
+    LLM_KV_INKLING_ATTN_RES_BLOCK,
+    LLM_KV_INKLING_CONV_KERNEL,
+
     LLM_KV_XIELU_ALPHA_N,
     LLM_KV_XIELU_ALPHA_P,
     LLM_KV_XIELU_BETA,
@@ -526,6 +536,23 @@ enum llm_tensor {
     LLM_TENSOR_ATTN_POST_NORM,
     LLM_TENSOR_ATTN_ROT_EMBD,
     LLM_TENSOR_ATTN_SINKS,
+    LLM_TENSOR_ATTN_SINK_PROJ,    // inkling2: per-token attention sink logits
+    LLM_TENSOR_ATTN_REL,          // inkling2: relative-state projection
+    LLM_TENSOR_ATTN_REL_PROJ,     // inkling2: bias-vs-distance profiles
+    LLM_TENSOR_ATTN_Q_CLIP,       // inkling2: learned scale before the q L2 clip
+    LLM_TENSOR_ATTN_REL_CLIP,     // inkling2: learned scale before the rel L2 clip
+    LLM_TENSOR_ATTN_K_CONV,       // inkling2: short conv on k (static taps)
+    LLM_TENSOR_ATTN_V_CONV,       // inkling2: short conv on v (static taps)
+    LLM_TENSOR_ATTN_K_CONV_DYN,   // inkling2: per-token k conv taps
+    LLM_TENSOR_ATTN_V_CONV_DYN,   // inkling2: per-token v conv taps
+    LLM_TENSOR_ATTN_POST_CONV,    // inkling2: short conv after attention
+    LLM_TENSOR_FFN_POST_CONV,     // inkling2: short conv after the MoE
+    LLM_TENSOR_ATTN_Q_IN_NORM,    // inkling2: full-attention q input norm
+    LLM_TENSOR_ATTN_K_IN_NORM,
+    LLM_TENSOR_ATTN_V_IN_NORM,
+    LLM_TENSOR_ATTN_RES_Q,        // inkling2: block attention residual queries
+    LLM_TENSOR_FFN_RES_Q,
+    LLM_TENSOR_OUTPUT_RES_Q,
     LLM_TENSOR_ATTN_GATE,
     LLM_TENSOR_ATTN_RESID_ALPHA,
     LLM_TENSOR_ATTN_RESID_BETA,

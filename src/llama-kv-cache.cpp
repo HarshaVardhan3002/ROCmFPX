@@ -1831,6 +1831,38 @@ void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch 
     }
 }
 
+// inkling2: backward distance from each query token to each KV cell, for the banded relative bias
+// distances outside [0, rel_extent) and empty cells map to rel_extent (a zero bias column)
+// cells of other sequences or outside the window are masked by kq_mask, so their value does not matter
+void llama_kv_cache::set_input_rel_dist(ggml_tensor * dst, const llama_ubatch * ubatch, int32_t rel_extent) const {
+    const int64_t n_tokens = ubatch->n_tokens;
+
+    GGML_ASSERT(n_stream == 1 && "TODO: support multiple streams");
+    const auto & cells = v_cells[0];
+
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+    GGML_ASSERT(dst->ne[1] == n_tokens);
+
+    int32_t * data = (int32_t *) dst->data;
+
+    const int64_t n_kv = dst->ne[0];
+
+    for (int64_t i = 0; i < n_tokens; ++i) {
+        const llama_pos p1 = ubatch->pos[i];
+        for (int64_t j = 0; j < n_kv; ++j) {
+            int32_t d = rel_extent;
+            if (j < (int64_t) cells.size() && !cells.is_empty(j)) {
+                const llama_pos dist = p1 - cells.pos_get(j);
+                if (dist >= 0 && dist < rel_extent) {
+                    d = dist;
+                }
+            }
+            data[i*n_kv + j] = d;
+        }
+    }
+}
+
 void llama_kv_cache::set_input_k_rot(ggml_tensor * dst) const {
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
 
@@ -2959,6 +2991,10 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     kv->set_input_pos_bucket(dst, ubatch);
+}
+
+void llama_kv_cache_context::set_input_rel_dist(ggml_tensor * dst, const llama_ubatch * ubatch, int32_t rel_extent) const {
+    kv->set_input_rel_dist(dst, ubatch, rel_extent);
 }
 
 void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {

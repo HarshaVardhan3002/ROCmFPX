@@ -2989,6 +2989,27 @@ struct llama_model_mimo2 : public llama_model_base {
 };
 
 
+struct llama_model_inkling2 : public llama_model_base {
+    llama_model_inkling2(const struct llama_model_params & params) : llama_model_base(params) {}
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    struct graph : public llm_graph_context {
+        graph(const llama_model & model, const llm_graph_params & params);
+
+        const llama_model & model;
+
+        ggml_tensor * block_mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur,
+                                ggml_tensor * q, int il, const char * name);
+        ggml_tensor * l2_clip(ggml_tensor * x, ggml_tensor * scale, float threshold);
+        ggml_tensor * short_conv(ggml_tensor * x, ggml_tensor * conv_rs, ggml_tensor * conv_state,
+                                 int64_t ch_off, ggml_tensor * kernel,
+                                 ggml_tensor * dyn_w, int64_t n_dyn_heads, int il);
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
 struct llama_model_kimi_k3 : public llama_model_base {
     llama_model_kimi_k3(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;

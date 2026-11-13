@@ -599,6 +599,24 @@ struct llama_layer {
     struct ggml_tensor * ssm_g_b    = nullptr;
     struct ggml_tensor * ssm_o_norm = nullptr;
 
+    // inkling2
+    struct ggml_tensor * attn_rel         = nullptr; // relative-state projection
+    struct ggml_tensor * attn_rel_proj    = nullptr; // bias-vs-distance profiles [d_rel, rel_extent]
+    struct ggml_tensor * attn_q_clip      = nullptr; // [head_dim, n_head]
+    struct ggml_tensor * attn_rel_clip    = nullptr; // [d_rel, n_head]
+    struct ggml_tensor * attn_sink_proj   = nullptr; // per-token sink logits [n_embd, n_head]
+    struct ggml_tensor * attn_k_conv      = nullptr; // static taps [kernel, n_embd_k_gqa]
+    struct ggml_tensor * attn_v_conv      = nullptr;
+    struct ggml_tensor * attn_k_conv_dyn  = nullptr; // per-token taps [n_embd, n_head_kv*kernel]
+    struct ggml_tensor * attn_v_conv_dyn  = nullptr;
+    struct ggml_tensor * attn_post_conv   = nullptr; // [kernel, n_embd]
+    struct ggml_tensor * ffn_post_conv    = nullptr;
+    struct ggml_tensor * attn_q_in_norm   = nullptr;
+    struct ggml_tensor * attn_k_in_norm   = nullptr;
+    struct ggml_tensor * attn_v_in_norm   = nullptr;
+    struct ggml_tensor * attn_res_q       = nullptr; // [n_embd] or [n_embd, 3]
+    struct ggml_tensor * ffn_res_q        = nullptr; // [n_embd]
+
     // kimi-k3
     struct ggml_tensor * ssm_g           = nullptr; // full-rank KDA gate (replaces ssm_g_a/ssm_g_b)
     struct ggml_tensor * attn_res_score  = nullptr; // fused res_norm*res_proj, pre-attention
@@ -751,6 +769,7 @@ struct llama_model {
 
     struct ggml_tensor * output_norm     = nullptr;
     struct ggml_tensor * output_res_score = nullptr; // kimi-k3: final cross-layer residual mix
+    struct ggml_tensor * output_res_q     = nullptr; // inkling2: final block attention residual query
     struct ggml_tensor * output_norm_b   = nullptr;
     struct ggml_tensor * output          = nullptr;
     struct ggml_tensor * output_b        = nullptr;

@@ -211,6 +211,11 @@ uint32_t llama_hparams::n_embd_r() const {
         return token_shift_count * n_embd;
     }
 
+    if (inkling_conv_channels != 0) {
+        // inkling2: four short convs per layer share one state row
+        return (inkling_conv_kernel - 1) * inkling_conv_channels;
+    }
+
     if (n_shortconv_l_cache != 0) {
         // for LFM2 models
         return n_embd * (n_shortconv_l_cache - 1);

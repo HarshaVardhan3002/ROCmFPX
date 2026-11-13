@@ -898,6 +898,9 @@ static bool arch_supported(const llm_arch arch) {
     if (arch == LLM_ARCH_WAVTOKENIZER_DEC) {
         return false; // FIXME CUDA backend crashes.
     }
+    if (arch == LLM_ARCH_INKLING2) {
+        return false; // needs its own fixture keys (rel extent, conv kernel, ...); checked against PyTorch by tools/inkling2
+    }
     if (arch == LLM_ARCH_GEMMA4 || arch == LLM_ARCH_GEMMA4_ASSISTANT) {
         return false; // FIXME @ngxson
     }

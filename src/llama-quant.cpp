@@ -476,6 +476,17 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
         quantize &= name.find("attn_v_b.weight")         == std::string::npos;
     }
 
+    // inkling2: block-residual queries, clip scales, relative profiles and conv taps are small and stay F32
+    // (the conv taps feed ggml_ssm_conv, which takes F32 only)
+    if (arch == LLM_ARCH_INKLING2) {
+        quantize &= name.find("_res_q")    == std::string::npos;
+        quantize &= name.find("_clip.")    == std::string::npos;
+        quantize &= name.find("attn_rel_proj") == std::string::npos;
+        quantize &= name.find("_conv.")    == std::string::npos;
+        quantize &= name.find("_conv_dyn") == std::string::npos;
+        quantize &= name.find("sink_proj") == std::string::npos;
+    }
+
     // the decision head of vllm-decision2 is small and computed in F32
     if (arch == LLM_ARCH_VLLM_DECISION2) {
         quantize &= name.compare(0, 9, "decision.") != 0;
