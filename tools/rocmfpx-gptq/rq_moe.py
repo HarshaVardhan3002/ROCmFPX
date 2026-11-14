@@ -7,6 +7,7 @@ python -I rq_moe.py --gguf-py DIR --hf MODEL_DIR --template T.gguf --calib TXT -
 """
 import argparse, sys, time
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -49,6 +50,7 @@ def gptq_b(W, H, qgroup, g, blocksize=128, damp=0.01):
             if c % g == 0:
                 rqf = qgroup(W1[:, :, j:j + g], c)
             w = W1[:, :, j]
+            assert rqf is not None
             q = rqf(w)
             Q1[:, :, j] = q
             e = (w - q) / Ui[:, j, j][:, None]
@@ -131,12 +133,12 @@ def main():
     rq.SEARCH = args.search
     rq.WINDOW = tuple(int(v) for v in args.window.split(",")) if args.window else None
     t0 = time.time()
-    tok = AutoTokenizer.from_pretrained(args.hf)
+    tok = cast(Any, AutoTokenizer.from_pretrained(args.hf))
     ids = tok(Path(args.calib).read_text(encoding="utf-8", errors="ignore"), return_tensors="pt").input_ids[0]
     n = min(args.nchunks, ids.numel() // args.ctx)
     calib = ids[: n * args.ctx].reshape(n, args.ctx)
     assert n > 0, 'no calibration chunks (tokenizer or calib file problem)'
-    model = AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16).to(dev).eval()
+    model = cast(Any, AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16)).to(dev).eval()
     nl = model.config.get_text_config().num_hidden_layers
     layers = next(m for m in model.modules() if isinstance(m, torch.nn.ModuleList) and len(m) == nl)
     print(f"{type(model).__name__}: {nl} layers, calib {n}x{args.ctx}", flush=True)
@@ -169,7 +171,7 @@ def main():
     results, stats = {}, {}
     spill = Path(args.out + ".spill"); spill.mkdir(parents=True, exist_ok=True)
     for li, layer in enumerate(layers):
-        ex = layer.mlp.experts
+        ex: Any = cast(Any, layer).mlp.experts
         E, I2, Hd = ex.gate_up_proj.shape
         I = I2 // 2
         S_gu = torch.zeros(E, Hd, Hd, device=dev)

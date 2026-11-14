@@ -11,6 +11,7 @@ python -I rq.py --gguf-py DIR --hf MODEL_DIR --f16 F16.gguf --template TEMPLATE.
 """
 import argparse, json, math, sys, time
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -24,7 +25,7 @@ def ue4m3_table():
                 t.append((8 + m) * 2.0 ** (e - 11))
     return torch.tensor(t, dtype=torch.float32)
 
-UE = None  # set on device in main
+UE: torch.Tensor = torch.empty(0)  # set on device in main
 
 # ---------------------------------------------------------------- code rounding, exactly as the C++ encoders
 def dec_s40(x, s):            # x, s broadcastable; returns reconstructed value
@@ -52,7 +53,7 @@ dec_s40, dec_fp3, dec_i4 = safe(dec_s40), safe(dec_fp3), safe(dec_i4)
 
 BLOCK = {"S40": (16, dec_s40, 4.0, 2), "FP3": (16, dec_fp3, 4.0, 2), "I4": (32, dec_i4, 7.0, 3)}  # group, dec, qmax, qmax_log2
 
-WINDOW = None    # (below, above): restrict the exhaustive search to scale indices around nearest(max/qmax)
+WINDOW: tuple[int, ...] | None = None    # (below, above): restrict the exhaustive search to scale indices around nearest(max/qmax)
 SEARCH = "cpp"   # "cpp": replay the C++ search order incl. its clip pruning; "exhaustive": true argmin
 
 def nearest_e(target):
@@ -228,6 +229,7 @@ def gptq(W, H, qfun_group, g, blocksize=128, damp=0.01):
             if c % g == 0:
                 rq = qfun_group(W1[:, j:j + g], c)          # returns per-column rounding fn for this group
             w = W1[:, j]
+            assert rq is not None
             q = rq(w, c % g)
             Q1[:, j] = q
             e = (w - q) / Hi[j, j]
@@ -359,7 +361,7 @@ def main():
 
     # ---- calibration tokens
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(args.hf)
+    tok = cast(Any, AutoTokenizer.from_pretrained(args.hf))
     ids = tok(Path(args.calib).read_text(encoding="utf-8", errors="ignore"), return_tensors="pt").input_ids[0]
     n = min(args.nchunks, ids.numel() // args.ctx)
     calib = ids[: n * args.ctx].reshape(n, args.ctx)
@@ -370,7 +372,7 @@ def main():
     results, reals = {}, {}
     assert not (args.real and args.transform != 'none'), 'real files only without online transform'
     if need_h:
-        model = AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16).to(dev).eval()
+        model = cast(Any, AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16)).to(dev).eval()
         layers = model.model.layers
         # catch layer-0 inputs
         inps, kw = [], {}

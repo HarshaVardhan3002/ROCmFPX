@@ -74,6 +74,7 @@ def main():
         if ps is not None:
             p = np.asarray(ps.data, dtype=np.float32).reshape(-1)
             assert p.size == n_in and n_in % hb == 0, t.name
+            assert H is not None, "rotation scales need a Hadamard block size"
             m = (m.reshape(out, n_in // hb, hb) @ H).reshape(out, n_in) * p[None, :]
             n_rot += 1
         if not np.isfinite(m).all():
