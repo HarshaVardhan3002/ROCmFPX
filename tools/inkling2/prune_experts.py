@@ -29,8 +29,8 @@ EXPERT_SUFFIXES = ("ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.
 
 def load_stats(path):
     rows = np.loadtxt(path, comments="#", skiprows=2)
-    n_layer = int(rows[:, 0].max()) + 1
-    n_expert = int(rows[:, 1].max()) + 1
+    n_layer = int(np.max(rows[:, 0])) + 1
+    n_expert = int(np.max(rows[:, 1])) + 1
     get = lambda c: rows[:, c].reshape(n_layer, n_expert)  # noqa: E731
     return get(2), get(3), get(4)
 
@@ -67,7 +67,7 @@ def rewrite(src, dst, sets, n_expert, is_expert_tensor, arch_key_override):
     r = gguf.GGUFReader(src)
     arch_f = r.fields.get("general.architecture")
     arch = arch_f.contents() if arch_f is not None else None
-    w = gguf.GGUFWriter(dst, arch, endianess=r.endianess)
+    w = gguf.GGUFWriter(dst, arch or "", endianess=r.endianess)  # imatrix files have no architecture; "" writes none
     copy_fields(r, w, {"general.architecture"} if arch else set(), arch_key_override(arch))
     plan = []
     for t in r.tensors:
