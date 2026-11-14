@@ -370,6 +370,12 @@ llama_context::llama_context(
     cparams.kv_unified     = params.kv_unified;
     cparams.moe_cache_size = params.moe_cache_size;
 
+    // the Inkling 2 graph supports one KV stream only; several sequences share a unified cache instead
+    if (model.arch == LLM_ARCH_INKLING2 && !cparams.kv_unified && params.n_seq_max > 1) {
+        LLAMA_LOG_WARN("%s: inkling2 uses a unified KV cache for %u sequences\n", __func__, params.n_seq_max);
+        cparams.kv_unified = true;
+    }
+
     // initialized later
     cparams.pipeline_parallel = false;
     cparams.training = false;
