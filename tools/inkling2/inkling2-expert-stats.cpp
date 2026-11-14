@@ -150,6 +150,8 @@ int main(int argc, char ** argv) {
     cp.n_batch = n_ctx * n_par;
     cp.n_ubatch = n_ctx * n_par;
     cp.n_seq_max = n_par;
+    const char * nth = getenv("N_THREADS"); // the library default is 4 threads
+    cp.n_threads = cp.n_threads_batch = nth ? atoi(nth) : 20;
     cp.kv_unified = true;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cp.cb_eval = cb;
