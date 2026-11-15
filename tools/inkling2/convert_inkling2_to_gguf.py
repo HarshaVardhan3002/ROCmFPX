@@ -22,6 +22,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -71,7 +72,7 @@ class Source:
 
     def get(self, name: str) -> torch.Tensor:
         fname = self.weight_map[name]
-        h = self._handles.get(fname)
+        h: Any = self._handles.get(fname)
         if h is None:
             h = safe_open(self.dir / fname, "pt")
             self._handles[fname] = h
@@ -135,7 +136,7 @@ def load_config(model_dir: Path) -> dict:
     t = c.get("text_config", c)
     g = lambda *keys, default=None: next((t[k] for k in keys if k in t), default)  # noqa: E731
 
-    n_layer = g("num_hidden_layers")
+    n_layer: int = t["num_hidden_layers"]
     if "layer_types" in t:
         is_swa = [lt == "hybrid_sliding" for lt in t["layer_types"]]
     else:
@@ -386,7 +387,7 @@ def add_vocab(w: gguf.GGUFWriter, tok_dir: Path, n_vocab: int):
 
     w.add_tokenizer_model("gpt2")
     w.add_tokenizer_pre("gpt-4o")
-    w.add_token_list(tokens)
+    w.add_token_list([str(t) for t in tokens])  # every slot is filled above
     w.add_token_types(types)
     w.add_token_merges(merges)
 
