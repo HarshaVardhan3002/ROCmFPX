@@ -377,6 +377,9 @@ struct llama_hparams {
     uint32_t ple_heads_per_ngram = 0;
     uint32_t ple_conv_kernel     = 0;
     uint32_t ple_n_heads         = 0;   // (ngram_size - 1) * heads_per_ngram
+    uint32_t ple_n_modules       = 1;
+    // Engram: the token that pads the n-gram history
+    uint32_t engram_pad_id       = 0;
     uint32_t ple_head_dim        = 0;
     uint32_t ple_eos_token_id    = 0;
     // the id the PLE hash stands in at image positions; 0 makes the loader fall back to EOS
