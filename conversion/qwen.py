@@ -723,6 +723,30 @@ class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         logger.info(f"gguf: qev decision model, attention {attn.get('full_attention')}, {len(labels)} labels")
 
 
+@ModelBase.register("HaruForConditionalGeneration")
+@ModelBase.example("higurashi-ai/Haru-4B")
+class HaruModel(Qwen3_5TextModel):
+    """Text backbone of the Haru full-duplex speech model (config "lm", tensors "lm.*"), as a plain qwen35 GGUF.
+
+    The audio parts (projectors, MeanFlow head, VibeVoice codec) go to a separate file made by
+    tools/haru/convert_haru_audio.py; the runtime is tools/haru (llama-haru).
+    """
+    model_arch = gguf.MODEL_ARCH.QWEN35
+    no_mtp = True
+
+    def __init__(self, dir_model, *args, **kwargs):
+        hparams = kwargs.pop("hparams", None)
+        if hparams is None:
+            hparams = ModelBase.load_hparams(dir_model, self.is_mistral_format)
+        hparams = {**hparams, "text_config": hparams["lm"]}
+        super().__init__(dir_model, *args, hparams=hparams, **kwargs)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if not name.startswith("lm."):
+            return  # audio parts: tools/haru/convert_haru_audio.py
+        yield from super().modify_tensors(data_torch, "model." + name[len("lm."):], bid)
+
+
 @ModelBase.register("SenseNovaLoopForConditionalGeneration")
 @ModelBase.example("sensenova/SenseNova-Loop-9B")
 class SenseNovaLoopModel(Qwen3_5TextModel):
