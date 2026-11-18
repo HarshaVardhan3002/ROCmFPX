@@ -87,6 +87,8 @@ float ggml_table_f32_e8m0_half[1 << 8];
 
 // precomputed f32 table for ue4m3 (1 KB) (simd-mappings.h)
 float ggml_table_f32_ue4m3[1 << 8];
+// ROCmFPX UE4M3 block scales (not the same decode as ggml_table_f32_ue4m3), filled in ggml_cpu_init
+static float ggml_table_f32_rocmfpx_ue4m3[1 << 8];
 
 #if defined(__ARM_ARCH)
 struct ggml_arm_arch_features_type {
@@ -373,35 +375,85 @@ static void ggml_vec_dot_rocmi4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, 
     *s = sumf;
 }
 
-static void ggml_vec_dot_rocmfpx_fp8_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+// Q8_0_ROCMFPX takes F32 activations on the CPU. With Q8_0 activations (as stock Q8_0 does) the rounding of the
+// activations costs more than the 8-bit weights themselves: on Haru-4B dialogue frames every matmul lost 0.3-1.5%
+// to it, so the real file scored hidden cos 0.966 while its F16 expansion scored 0.9966. With F32 activations the
+// real file computes what its expansion computes.
+static void ggml_vec_dot_rocmfpx_fp8_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     GGML_UNUSED(bs);
     GGML_UNUSED(bx);
     GGML_UNUSED(by);
     assert(nrc == 1);
     GGML_UNUSED(nrc);
     assert(n % QK_ROCMFP8 == 0);
-    assert(QK_ROCMFP8 == QK8_0);
 
     const block_rocmfp8 * GGML_RESTRICT x = (const block_rocmfp8 *) vx;
-    const block_q8_0    * GGML_RESTRICT y = (const block_q8_0 *) vy;
+    const float         * GGML_RESTRICT y = (const float *) vy;
 
     const int nb = n / QK_ROCMFP8;
-    float sumf = 0.0f;
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    // 4 independent product chains per block and 2 block accumulators keep the FMA pipes busy
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
     for (int ib = 0; ib < nb; ++ib) {
-        const float dx = rocmfpx_ue4m3_to_fp32(x[ib].e);
-        const float dy = GGML_CPU_FP16_TO_FP32(y[ib].d);
-        const float d  = dx * dy;
-
-        int sumi = 0;
-        for (int j = 0; j < QK_ROCMFP8; ++j) {
-            sumi += (int) x[ib].qs[j] * (int) y[ib].qs[j];
+        const float * yb = y + ib*QK_ROCMFP8;
+        const int8x16_t q0 = vld1q_s8(x[ib].qs);
+        const int8x16_t q1 = vld1q_s8(x[ib].qs + 16);
+        const int16x8_t h0 = vmovl_s8(vget_low_s8(q0));
+        const int16x8_t h1 = vmovl_s8(vget_high_s8(q0));
+        const int16x8_t h2 = vmovl_s8(vget_low_s8(q1));
+        const int16x8_t h3 = vmovl_s8(vget_high_s8(q1));
+        float32x4_t p0 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16 (h0))), vld1q_f32(yb +  0));
+        float32x4_t p1 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(h0))), vld1q_f32(yb +  4));
+        float32x4_t p2 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16 (h1))), vld1q_f32(yb +  8));
+        float32x4_t p3 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(h1))), vld1q_f32(yb + 12));
+        p0 = vfmaq_f32(p0, vcvtq_f32_s32(vmovl_s16(vget_low_s16 (h2))), vld1q_f32(yb + 16));
+        p1 = vfmaq_f32(p1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(h2))), vld1q_f32(yb + 20));
+        p2 = vfmaq_f32(p2, vcvtq_f32_s32(vmovl_s16(vget_low_s16 (h3))), vld1q_f32(yb + 24));
+        p3 = vfmaq_f32(p3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(h3))), vld1q_f32(yb + 28));
+        const float32x4_t sb = vaddq_f32(vaddq_f32(p0, p1), vaddq_f32(p2, p3));
+        if (ib & 1) {
+            acc1 = vfmaq_n_f32(acc1, sb, ggml_table_f32_rocmfpx_ue4m3[x[ib].e]);
+        } else {
+            acc0 = vfmaq_n_f32(acc0, sb, ggml_table_f32_rocmfpx_ue4m3[x[ib].e]);
         }
-
-        sumf += d * (float) sumi;
     }
-
+    *s = vaddvq_f32(vaddq_f32(acc0, acc1));
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    for (int ib = 0; ib < nb; ++ib) {
+        const float * yb = y + ib*QK_ROCMFP8;
+        const int8_t * q = x[ib].qs;
+        __m256 a0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q +  0)))), _mm256_loadu_ps(yb +  0));
+        __m256 a1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q +  8)))), _mm256_loadu_ps(yb +  8));
+        a0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q + 16)))), _mm256_loadu_ps(yb + 16), a0);
+        a1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q + 24)))), _mm256_loadu_ps(yb + 24), a1);
+        const __m256 d = _mm256_set1_ps(ggml_table_f32_rocmfpx_ue4m3[x[ib].e]);
+        if (ib & 1) {
+            acc1 = _mm256_fmadd_ps(_mm256_add_ps(a0, a1), d, acc1);
+        } else {
+            acc0 = _mm256_fmadd_ps(_mm256_add_ps(a0, a1), d, acc0);
+        }
+    }
+    const __m256 acc = _mm256_add_ps(acc0, acc1);
+    __m128 r = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+    r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+    r = _mm_add_ss(r, _mm_movehdup_ps(r));
+    *s = _mm_cvtss_f32(r);
+#else
+    float sumf = 0.0f;
+    for (int ib = 0; ib < nb; ++ib) {
+        const float * yb = y + ib*QK_ROCMFP8;
+        float sumb = 0.0f;
+        for (int j = 0; j < QK_ROCMFP8; ++j) {
+            sumb += (float) x[ib].qs[j] * yb[j];
+        }
+        sumf += ggml_table_f32_rocmfpx_ue4m3[x[ib].e] * sumb;
+    }
     *s = sumf;
+#endif
 }
 
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
@@ -471,8 +523,8 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_Q8_0_ROCMFPX] = {
         .from_float               = rocmfpx_quantize_row_fp8,
-        .vec_dot                  = ggml_vec_dot_rocmfpx_fp8_q8_0,
-        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .vec_dot                  = ggml_vec_dot_rocmfpx_fp8_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q4_0_ROCMI4] = {
@@ -4137,6 +4189,7 @@ void ggml_cpu_init(void) {
             // initialize UE4M3 table (256 entries)
             for (int i = 0; i < (1 << 8); ++i) {
                 ggml_table_f32_ue4m3[i] = ggml_ue4m3_to_fp32(i);
+                ggml_table_f32_rocmfpx_ue4m3[i] = rocmfpx_ue4m3_to_fp32(i);
             }
 
             const uint64_t t_end = ggml_time_us(); UNUSED(t_end);
