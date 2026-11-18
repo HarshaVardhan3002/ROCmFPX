@@ -248,6 +248,9 @@ void llama_model_hy_v4_flash::load_arch_tensors(llama_model_loader &) {
         layer.wo             = create_tensor(tn(LLM_TENSOR_ATTN_OUT,       "weight", i), {n_head_l * n_embd_head_v_mla, n_embd}, 0);
         layer.wqkv_gate      = create_tensor(tn(LLM_TENSOR_ATTN_GATE,      "weight", i), {n_embd, n_head_l * n_embd_head_v_mla}, 0);
         layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", i), {n_embd}, 0);
+        layer.wq_a_s         = create_tensor(tn(LLM_TENSOR_ATTN_Q_A,       "scale",  i), {1}, TENSOR_NOT_REQUIRED);
+        layer.wq_b_s         = create_tensor(tn(LLM_TENSOR_ATTN_Q_B,       "scale",  i), {1}, TENSOR_NOT_REQUIRED);
+        layer.wkv_a_mqa_s    = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA,  "scale",  i), {1}, TENSOR_NOT_REQUIRED);
 
         if (!is_nextn) {
             layer.hc_attn_fn    = create_tensor(tn(LLM_TENSOR_HC_ATTN_FN,    "weight", i), {hc * n_embd, 2 * hc}, 0);
@@ -290,6 +293,7 @@ void llama_model_hy_v4_flash::load_arch_tensors(llama_model_loader &) {
             // deepseek41 does; unlike deepseek41 they carry a bias
             layer.engram_kv          = create_tensor(tn(LLM_TENSOR_ENGRAM_KV,          "weight", i), {ple_n_heads * ple_head_dim, n_embd * (hc + 1)}, 0);
             layer.engram_kv_b        = create_tensor(tn(LLM_TENSOR_ENGRAM_KV_B,        "weight", i), {n_embd, hc + 1}, 0);
+            layer.engram_kv_s        = create_tensor(tn(LLM_TENSOR_ENGRAM_KV,          "scale",  i), {1}, TENSOR_NOT_REQUIRED);
             layer.engram_gate        = create_tensor(tn(LLM_TENSOR_ENGRAM_GATE,        "weight", i), {n_embd, hc}, 0);
             layer.engram_lookup_norm = create_tensor(tn(LLM_TENSOR_ENGRAM_LOOKUP_NORM, "weight", i), {ple_head_dim, ple_n_heads}, 0);
             layer.engram_pre_gamma   = create_tensor(tn(LLM_TENSOR_ENGRAM_PRE_GAMMA,   "weight", i), {n_embd}, 0);
@@ -311,6 +315,8 @@ void llama_model_hy_v4_flash::load_arch_tensors(llama_model_loader &) {
             if (hparams.n_expert_latent) {
                 layer.ffn_routed_down = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_DOWN, "weight", i), {n_embd, n_embd_latent}, 0);
                 layer.ffn_routed_up   = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_UP,   "weight", i), {n_embd_latent, n_embd}, 0);
+                layer.ffn_routed_down_s = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_DOWN, "scale", i), {1}, TENSOR_NOT_REQUIRED);
+                layer.ffn_routed_up_s   = create_tensor(tn(LLM_TENSOR_FFN_ROUTED_UP,   "scale", i), {1}, TENSOR_NOT_REQUIRED);
             }
 
             layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd_latent, n_ff_exp,      n_expert}, 0);
@@ -474,7 +480,7 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_engram(
     cb(r, "engram_rows_normed", il);
 
     // delta 2: the fused key/value projection carries a bias
-    ggml_tensor * kv = build_lora_mm(layer.engram_kv, r);
+    ggml_tensor * kv = build_lora_mm(layer.engram_kv, r, layer.engram_kv_s);
     kv = ggml_add(ctx0, ggml_reshape_3d(ctx0, kv, n_embd, hc + 1, nt), layer.engram_kv_b);
     cb(kv, "engram_kv", il);
 
@@ -947,11 +953,11 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_attention(
     const float kq_scale    = 1.0f / sqrtf(float(n_embd_head_k));
     const float freq_base_l = model.get_rope_freq_base(cparams, il);
 
-    ggml_tensor * qr = ggml_mul_mat(ctx0, layer.wq_a, cur);
+    ggml_tensor * qr = build_lora_mm(layer.wq_a, cur, layer.wq_a_s);
     qr = build_norm(qr, layer.attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
     cb(qr, "q_resid", il);
 
-    ggml_tensor * q = ggml_mul_mat(ctx0, layer.wq_b, qr);
+    ggml_tensor * q = build_lora_mm(layer.wq_b, qr, layer.wq_b_s);
 
     ggml_tensor * q_nope = ggml_view_3d(ctx0, q, n_embd_head_qk_nope, n_head_l, n_tokens,
             ggml_row_size(q->type, n_embd_head_k), ggml_row_size(q->type, n_embd_head_k) * n_head_l, 0);
@@ -959,7 +965,7 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_attention(
             ggml_row_size(q->type, n_embd_head_k), ggml_row_size(q->type, n_embd_head_k) * n_head_l,
             ggml_row_size(q->type, n_embd_head_qk_nope));
 
-    ggml_tensor * kv_cmpr_pe = ggml_mul_mat(ctx0, layer.wkv_a_mqa, cur);
+    ggml_tensor * kv_cmpr_pe = build_lora_mm(layer.wkv_a_mqa, cur, layer.wkv_a_mqa_s);
     ggml_tensor * kv_cmpr = ggml_view_2d(ctx0, kv_cmpr_pe, kv_lora_rank, n_tokens,
             ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope), 0);
     ggml_tensor * k_pe = ggml_view_3d(ctx0, kv_cmpr_pe, n_embd_head_qk_rope, 1, n_tokens,
@@ -1052,12 +1058,12 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_attention(
     }
     cb(attn, "attn_kqv", il);
 
-    ggml_tensor * gate = ggml_mul_mat(ctx0, layer.wqkv_gate, cur);
+    ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, cur, layer.wqkv_gate_s);
     gate = ggml_sigmoid(ctx0, gate);
     attn = ggml_mul(ctx0, attn, gate);
     cb(attn, "attn_gated", il);
 
-    ggml_tensor * out = build_lora_mm(layer.wo, attn);
+    ggml_tensor * out = build_lora_mm(layer.wo, attn, layer.wo_s);
     out = build_norm(out, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
     cb(out, "attn_out", il);
 
@@ -1075,7 +1081,7 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_latent_moe(
     cb(logits, "ffn_moe_logits", il);
 
     ggml_tensor * routed_in = layer.ffn_routed_down
-        ? ggml_mul_mat(ctx0, layer.ffn_routed_down, cur)
+        ? build_lora_mm(layer.ffn_routed_down, cur, layer.ffn_routed_down_s)
         : cur;
 
     ggml_tensor * moe_out = build_moe_ffn(routed_in,
@@ -1089,18 +1095,22 @@ ggml_tensor * llama_model_hy_v4_flash::graph::build_latent_moe(
             hparams.expert_weights_scale,
             (llama_expert_gating_func_type) hparams.expert_gating_func,
             il,
-            logits);
+            logits,
+            nullptr,
+            layer.ffn_up_exps_s,
+            layer.ffn_gate_exps_s,
+            layer.ffn_down_exps_s);
     cb(moe_out, "ffn_moe_out", il);
 
     if (layer.ffn_routed_up) {
-        moe_out = ggml_mul_mat(ctx0, layer.ffn_routed_up, moe_out);
+        moe_out = build_lora_mm(layer.ffn_routed_up, moe_out, layer.ffn_routed_up_s);
         cb(moe_out, "ffn_moe_up", il);
     }
 
     ggml_tensor * shexp = build_ffn(cur,
-            layer.ffn_up_shexp,   NULL, NULL,
-            layer.ffn_gate_shexp, NULL, NULL,
-            layer.ffn_down_shexp, NULL, NULL,
+            layer.ffn_up_shexp,   NULL, layer.ffn_up_shexp_s,
+            layer.ffn_gate_shexp, NULL, layer.ffn_gate_shexp_s,
+            layer.ffn_down_shexp, NULL, layer.ffn_down_shexp_s,
             NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
     cb(shexp, "ffn_shexp", il);
 
@@ -1190,9 +1200,9 @@ llama_model_hy_v4_flash::graph::graph(const llama_model & model, const llm_graph
 
         if ((uint32_t) il < hparams.n_layer_dense_lead) {
             cur = build_ffn(cur,
-                    layer.ffn_up,   NULL, NULL,
-                    layer.ffn_gate, NULL, NULL,
-                    layer.ffn_down, NULL, NULL,
+                    layer.ffn_up,   NULL, layer.ffn_up_s,
+                    layer.ffn_gate, NULL, layer.ffn_gate_s,
+                    layer.ffn_down, NULL, layer.ffn_down_s,
                     NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
         } else {
             cur = build_latent_moe(model, cur, il);
@@ -1229,7 +1239,7 @@ llama_model_hy_v4_flash::graph::graph(const llama_model & model, const llm_graph
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 }
@@ -1281,7 +1291,7 @@ llama_model_hy_v4_flash::graph_mtp::graph_mtp(const llama_model & model, const l
     ggml_tensor * cur = ggml_concat(ctx0,
             build_norm(tok_embd, layer.nextn.enorm, nullptr, LLM_NORM_RMS, il),
             build_norm(prev_h,   layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il), 0);
-    cur = ggml_mul_mat(ctx0, layer.nextn.eh_proj, cur);
+    cur = build_lora_mm(layer.nextn.eh_proj, cur, layer.nextn.eh_proj_s);
     cb(cur, "mtp_eh_proj", il);
 
     // from here it is an ordinary sparse layer, except that the residual is the plain hidden state
@@ -1311,7 +1321,7 @@ llama_model_hy_v4_flash::graph_mtp::graph_mtp(const llama_model & model, const l
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "mtp_result_output", -1);
 
     res->t_logits = cur;
