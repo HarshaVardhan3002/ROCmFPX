@@ -567,3 +567,96 @@ class HYV4FlashModel(HYV4Model):
             return
 
         yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("HYV4FlashForConditionalGeneration", "HYV4FlashForCausalLM")
+class HYV4FlashReleaseModel(HYV4FlashModel):
+    """The released tencent/Hy4-flash checkpoint (transformers model_type hy_v4_flash).
+
+    The weights are those HYV4FlashModel reads, but the config and a few tensors differ:
+    - layer_types / rope_parameters say "deepseek_sparse_attention" for the sparse layers;
+    - there is no engram_enable switch, Engram is on when engram_layer_ids is set;
+    - the token -> normalized id map ships as a lookup_table tensor in every Engram layer,
+      not as engram_vocab_map.npz. Ids past the table read as the pad token's id;
+    - Engram lookups are rounded through fp8 (e4m3, one scale per looked-up row) before the
+      per-head norms. That depends on the row alone, so it is applied to the table here;
+    - the speculative drafter is the 5-layer DFly2 block (model.dfly_layers), not an MTP
+      block, and is dropped.
+    """
+
+    model_arch = gguf.MODEL_ARCH.HY_V4_FLASH
+
+    DROP_PREFIXES = ("vit.", "model.dfly_layers.")
+    # the released config says deepseek_sparse_attention, transformers saves it back as indexed_attention
+    LAYER_TYPE_ALIASES = {"deepseek_sparse_attention": "sparse_attention", "indexed_attention": "sparse_attention"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        hp = self.hparams
+        alias = self.LAYER_TYPE_ALIASES
+        if hp.get("layer_types"):
+            hp["layer_types"] = [alias.get(t, t) for t in hp["layer_types"]]
+        rp = hp.get("rope_parameters")
+        if isinstance(rp, dict):
+            for old, new in alias.items():
+                if old in rp and new not in rp:
+                    rp[new] = rp[old]
+        if hp.get("engram_layer_ids") and "engram_enable" not in hp:
+            hp["engram_enable"] = True
+        self._engram_lookup: np.ndarray | None = None
+
+    def _read_lookup_tables(self) -> np.ndarray:
+        if self._engram_lookup is not None:
+            return self._engram_lookup
+        from safetensors import safe_open
+        index_path = Path(self.dir_model) / "model.safetensors.index.json"
+        if index_path.is_file():
+            index = json.loads(index_path.read_text())["weight_map"]
+        else:
+            index = {}
+            for f in sorted(Path(self.dir_model).glob("*.safetensors")):
+                with safe_open(str(f), framework="numpy") as h:
+                    index.update({k: f.name for k in h.keys()})
+        tables = []
+        for i in self._engram_ids():
+            name = f"model.layers.{i - 1}.engram_layer.lookup_table"
+            with safe_open(str(Path(self.dir_model) / index[name]), framework="numpy") as f:
+                tables.append(np.asarray(f.get_tensor(name)).astype(np.int64))
+        for t in tables[1:]:
+            if t.shape != tables[0].shape or not np.array_equal(t, tables[0]):
+                raise ValueError("HY_V4_FLASH: the Engram layers carry different lookup tables")
+        self._engram_lookup = tables[0]
+        return self._engram_lookup
+
+    def _engram_vocab_map(self) -> tuple[list[int], int]:
+        table = self._read_lookup_tables()
+        compressed = int(table.max()) + 1
+        n_vocab = self.hparams["vocab_size"]
+        pad = int(table[self.hparams["engram_pad_id"]])
+        token_map = [int(x) for x in table[:n_vocab]] + [pad] * max(0, n_vocab - len(table))
+        return token_map, compressed
+
+    @staticmethod
+    def _fp8_round_rows(t: torch.Tensor) -> torch.Tensor:
+        """The reference's _fp8_round_trip, applied to every row of a table. It runs in the model
+        dtype (bf16 here); chunked, so a 32 GB table only needs its output buffer."""
+        x = t
+        fmax = torch.finfo(torch.float8_e4m3fn).max
+        out = torch.empty(x.shape, dtype=x.dtype)
+        step = 1 << 22
+        for s in range(0, x.shape[0], step):
+            r = x[s:s + step]
+            scale = r.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / fmax
+            out[s:s + step] = (r / scale).clamp(-fmax, fmax).to(torch.float8_e4m3fn).to(x.dtype) * scale
+        return out
+
+    def modify_tensors(self, data_torch: torch.Tensor, name: str, bid: int | None) -> Iterable[tuple[str, torch.Tensor]]:
+        if name.endswith(".engram_layer.lookup_table"):
+            return
+        if name.endswith(".engram_layer.multi_head_embedding.embedding.weight") and self.hparams.get("engram_fp8_embedding"):
+            if isinstance(data_torch, gguf.LazyBase):
+                # evaluated when the tensor is written, one table at a time
+                data_torch = type(data_torch)._wrap_fn(self._fp8_round_rows, meta_noop=True)(data_torch)
+            else:
+                data_torch = self._fp8_round_rows(data_torch)
+        yield from super().modify_tensors(data_torch, name, bid)

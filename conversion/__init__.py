@@ -141,6 +141,8 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "HYV3ForCausalLM": "hunyuan",
     "HYV4ForCausalLM": "hy_v4",
     "HYV4NextForCausalLM": "hy_v4_flash",
+    "HYV4FlashForCausalLM": "hy_v4_flash",
+    "HYV4FlashForConditionalGeneration": "hy_v4_flash",
     "HYV4NextVLForConditionalGeneration": "hy_v4_flash",
     "HYV4VLForConditionalGeneration": "hy_v4",
     "IQuestCoderForCausalLM": "llama",
