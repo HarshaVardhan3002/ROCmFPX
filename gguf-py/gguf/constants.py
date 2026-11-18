@@ -592,6 +592,7 @@ class MODEL_ARCH(IntEnum):
     FLINT            = auto()
     QWEN3NEXT        = auto()
     HRM_TEXT         = auto()
+    SENSENOVA_LOOP   = auto()
     BEAM             = auto()
     QWEN3VL          = auto()
     QWEN3VLMOE       = auto()
@@ -752,6 +753,8 @@ class MODEL_TENSOR(IntEnum):
     POS_EMBD             = auto()
     OUTPUT               = auto()
     HRM_Z_L_INIT         = auto()
+    MHC_ATTN             = auto()
+    MHC_FFN              = auto()
     DENSE_2_OUT          = auto() # embeddinggemma 2_Dense
     DENSE_3_OUT          = auto() # embeddinggemma 3_Dense
     OUTPUT_NORM          = auto()
@@ -1436,6 +1439,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.QWEN3MOE:         "qwen3moe",
     MODEL_ARCH.QWEN3NEXT:        "qwen3next",
     MODEL_ARCH.HRM_TEXT:         "hrm_text",
+    MODEL_ARCH.SENSENOVA_LOOP:   "sensenova_loop",
     MODEL_ARCH.BEAM:             "beam",
     MODEL_ARCH.QWEN3VL:          "qwen3vl",
     MODEL_ARCH.QWEN3VLMOE:       "qwen3vlmoe",
@@ -1596,6 +1600,8 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.OUTPUT_NORM:               "output_norm",
     MODEL_TENSOR.OUTPUT:                    "output",
     MODEL_TENSOR.HRM_Z_L_INIT:              "hrm.z_l_init",
+    MODEL_TENSOR.MHC_ATTN:                  "blk.{bid}.mhc_attn",
+    MODEL_TENSOR.MHC_FFN:                   "blk.{bid}.mhc_ffn",
     MODEL_TENSOR.DENSE_2_OUT:               "dense_2", # embeddinggemma 2_Dense
     MODEL_TENSOR.DENSE_3_OUT:               "dense_3", # embeddinggemma 2_Dense
     MODEL_TENSOR.HC_HEAD_FN:                "output_hc_fn",
@@ -3222,6 +3228,33 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.NEXTN_HNORM,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
+    ],
+    MODEL_ARCH.SENSENOVA_LOOP: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_POST_NORM,
+        MODEL_TENSOR.ATTN_GATE,
+        MODEL_TENSOR.ATTN_QKV,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.SSM_A,
+        MODEL_TENSOR.SSM_CONV1D,
+        MODEL_TENSOR.SSM_DT,
+        MODEL_TENSOR.SSM_NORM,
+        MODEL_TENSOR.SSM_BETA,
+        MODEL_TENSOR.SSM_ALPHA,
+        MODEL_TENSOR.SSM_OUT,
+        MODEL_TENSOR.MHC_ATTN,
+        MODEL_TENSOR.MHC_FFN,
     ],
     MODEL_ARCH.CLEF: [
         MODEL_TENSOR.TOKEN_EMBD,

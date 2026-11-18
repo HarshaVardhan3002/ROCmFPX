@@ -2532,6 +2532,9 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     if (model.arch == LLM_ARCH_KIMI_K3 || model.arch == LLM_ARCH_GLM5_NEXT || model.arch == LLM_ARCH_INKLING2) {
         // the n_tokens*40 budget below is exhausted at ubatch 3840
         res = std::max<uint32_t>(n_tokens * 160, 64u * model.n_tensors());
+    } else if (model.arch == LLM_ARCH_SENSENOVA_LOOP) {
+        // 56 layer visits over 32 layers' tensors, and ~350 small mHC nodes per mHC visit (20 Sinkhorn steps)
+        res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors()) + 512u * model.hparams.n_layer();
     } else if (model.arch == LLM_ARCH_HRM_TEXT) {
         // the 128-slot looped graph needs roughly one stack per token budget
         res = std::max<uint32_t>(n_tokens * 80, 64u * model.n_tensors());

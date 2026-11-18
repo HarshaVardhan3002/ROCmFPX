@@ -2663,6 +2663,24 @@ struct llama_model_qwen35 : public llama_model_base {
                     ggml_tensor * input,
                             int   il);
 
+        // sensenova-loop mHC: streams is [n_embd, n_streams, n_tokens]. The router returns the branch input
+        // [n_embd, n_tokens] and sets post [n_streams, n_tokens] and mix [n_streams (src), n_streams (dst), n_tokens]
+        // (mix is null with fixed identity); merge returns mix @ streams + post * branch.
+        ggml_tensor * build_mhc_router(
+                    ggml_tensor * streams,
+                    ggml_tensor * w,
+                    ggml_tensor * b,
+                    ggml_tensor ** post,
+                    ggml_tensor ** mix,
+                            int   il);
+
+        ggml_tensor * build_mhc_merge(
+                    ggml_tensor * streams,
+                    ggml_tensor * branch,
+                    ggml_tensor * post,
+                    ggml_tensor * mix,
+                            int   il);
+
         const llama_model & model;
     };
 
@@ -2673,6 +2691,13 @@ struct llama_model_qwen35 : public llama_model_base {
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
 
+
+// SenseNova Loop: a Qwen3.5 backbone whose middle layers run several times (one cache slot per visit),
+// with mHC residual streams over part of the layers. The graph is the Qwen3.5 one.
+struct llama_model_sensenova_loop : public llama_model_qwen35 {
+    llama_model_sensenova_loop(const struct llama_model_params & params) : llama_model_qwen35(params) {}
+    void load_arch_hparams(llama_model_loader & ml) override;
+};
 
 // Qwen3.5 backbone evaluated without memory, with a joint decision head on top of its hidden states
 struct llama_model_clef : public llama_model_qwen35 {

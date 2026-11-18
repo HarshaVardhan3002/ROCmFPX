@@ -344,6 +344,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_qwen3next(params);
         case LLM_ARCH_QWEN35:
             return new llama_model_qwen35(params);
+        case LLM_ARCH_SENSENOVA_LOOP:
+            return new llama_model_sensenova_loop(params);
         case LLM_ARCH_QWEN35MOE:
             return new llama_model_qwen35moe(params);
         case LLM_ARCH_CLEF:
@@ -511,7 +513,7 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
     };
 
     auto get_tensor_config = [&]() -> tensor_config {
-        if (ud->model->arch == LLM_ARCH_HRM_TEXT) {
+        if (ud->model->arch == LLM_ARCH_HRM_TEXT || ud->model->arch == LLM_ARCH_SENSENOVA_LOOP) {
             // aliased cache slots cannot satisfy the meta-split invariants, so replicate all tensors
             return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, tensor, 0, 0};
         }
@@ -1888,6 +1890,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 output_in_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "input_scale"), {1}, TENSOR_NOT_REQUIRED);
             }
         }
+
+        // looped models: the later visits of a layer share its tensors, scales included (loaded above)
+        if (hparams.loop_count > 1) {
+            for (int i = 0; i < n_layer_all; ++i) {
+                const int src = (int) hparams.loop_first_slot(hparams.loop_physical(i));
+                if (src != i) {
+                    layers[i] = layers[src];
+                }
+            }
+        }
     }
 
     ml.done_getting_tensors();
@@ -2589,6 +2601,7 @@ void llama_model::print_info() const {
                 arch == LLM_ARCH_GRANITE_HYBRID ||
                 arch == LLM_ARCH_QWEN3NEXT ||
                 arch == LLM_ARCH_QWEN35 ||
+                arch == LLM_ARCH_SENSENOVA_LOOP ||
                 arch == LLM_ARCH_QWEN35MOE ||
                 arch == LLM_ARCH_CLOVER_MOE ||
                 arch == LLM_ARCH_NEMOTRON_H ||
@@ -3151,7 +3164,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         filter_recr = [&](uint32_t il) {
                             return hparams.is_recr(il) && hparams.n_ff(il) == 0;
                         };
-                    } else if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_CLOVER_MOE || arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_MINIMAX_01) {
+                    } else if (arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_SENSENOVA_LOOP || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_CLOVER_MOE || arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_MINIMAX_01) {
                         filter_attn = [&](uint32_t il) {
                             return il < hparams.n_layer() && !hparams.is_recr(il);
                         };
@@ -3681,6 +3694,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_QWEN3VL:
         case LLM_ARCH_QWEN3VLMOE:
         case LLM_ARCH_QWEN35:
+        case LLM_ARCH_SENSENOVA_LOOP:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_CLEF:
         case LLM_ARCH_QWEN4EXP:

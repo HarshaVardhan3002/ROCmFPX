@@ -723,6 +723,81 @@ class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         logger.info(f"gguf: qev decision model, attention {attn.get('full_attention')}, {len(labels)} labels")
 
 
+@ModelBase.register("SenseNovaLoopForConditionalGeneration")
+@ModelBase.example("sensenova/SenseNova-Loop-9B")
+class SenseNovaLoopModel(Qwen3_5TextModel):
+    """Qwen3.5 backbone whose layers [loop.start, loop.end) run loop.eval_count times, with mHC residual streams.
+
+    The GGUF block count is the number of layer visits (one KV / recurrent cache slot per visit). A physical layer
+    is stored under the block index of its first visit, so the layers after the loop move up by the repeated span.
+    The MTP head (mtp.safetensors) is not exported.
+    """
+    model_arch = gguf.MODEL_ARCH.SENSENOVA_LOOP
+    no_mtp = True
+
+    def __init__(self, dir_model, *args, **kwargs):
+        hparams = kwargs.pop("hparams", None)
+        if hparams is None:
+            hparams = ModelBase.load_hparams(dir_model, self.is_mistral_format)
+        loop = hparams["loop_settings"]
+        text = hparams["text_config"]
+        n_phys = text["num_hidden_layers"]
+        start, end, count = loop["start"], loop["end"], loop["eval_count"]
+        if loop.get("counts") != [count] or not (0 <= start < end <= n_phys and count >= 1):
+            raise ValueError(f"unsupported loop_settings {loop}")
+        plan = list(range(start)) + list(range(start, end)) * count + list(range(end, n_phys))
+        self._loop = (start, end, count)
+        self._n_extra = (end - start) * (count - 1)
+        mhc = hparams.get("mhc")
+        if mhc is not None and set(mhc) - {"start", "end", "streams", "iterations", "fixed_identity", "pre_scale"}:
+            raise ValueError(f"unknown mhc fields in {mhc}")
+        self._mhc = mhc
+        # the cache-slot view: block count and layer kinds per visit
+        text = dict(text)
+        text["layer_types"] = [text["layer_types"][p] for p in plan]
+        text["num_hidden_layers"] = len(plan)
+        hparams = {**hparams, "text_config": text}
+        super().__init__(dir_model, *args, hparams=hparams, **kwargs)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        arch = self.gguf_writer.arch
+        start, end, count = self._loop
+        self.gguf_writer.add_uint32(f"{arch}.loop.start", start)
+        self.gguf_writer.add_uint32(f"{arch}.loop.end", end)
+        self.gguf_writer.add_uint32(f"{arch}.loop.count", count)
+        if (mhc := self._mhc) is not None:
+            self.gguf_writer.add_uint32(f"{arch}.hyper_connection.count", mhc["streams"])
+            self.gguf_writer.add_uint32(f"{arch}.hyper_connection.sinkhorn_iterations", mhc["iterations"])
+            self.gguf_writer.add_uint32(f"{arch}.mhc.start", mhc["start"])
+            self.gguf_writer.add_uint32(f"{arch}.mhc.end", mhc["end"])
+            self.gguf_writer.add_float32(f"{arch}.mhc.pre_scale", float(mhc.get("pre_scale", 1.0)))
+            self.gguf_writer.add_bool(f"{arch}.mhc.fixed_identity", bool(mhc["fixed_identity"]))
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        if ".mhc_" in new_name:
+            return gguf.GGMLQuantizationType.F32  # the reference keeps the routers in FP32
+        if new_name.endswith(".ssm_conv1d.weight"):
+            # the generic F32 rule matches on the HF block index, which differs from the renamed one after the loop
+            return gguf.GGMLQuantizationType.F32
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if "loop_gate." in name:
+            return  # untrained constant, not used by the reference forward pass
+        if bid is not None and bid >= self._loop[1]:
+            # layers after the loop: block index of the first visit
+            new_bid = bid + self._n_extra
+            name = name.replace(f"layers.{bid}.", f"layers.{new_bid}.", 1)
+            bid = new_bid
+        if ".mhc_attn." in name or ".mhc_ffn." in name:
+            kind = gguf.MODEL_TENSOR.MHC_ATTN if ".mhc_attn." in name else gguf.MODEL_TENSOR.MHC_FFN
+            assert bid is not None
+            yield (self.format_tensor_name(kind, bid, "." + name.rpartition(".")[2]), data_torch.float())
+            return
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
 def _is_openjev_checkpoint(dir_model: Path) -> bool:
     return (dir_model / "helper" / "shim.py").is_file() and (dir_model / "config.json").is_file()
 

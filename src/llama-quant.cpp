@@ -276,6 +276,7 @@ static bool rocmfpx_tensor_scale_supported(const std::string & name, llm_arch ar
     static const std::regex pattern_gdn(R"(^blk\.\d+\.(attn_gate|ssm_(out|alpha|beta))\.weight$)");
     switch (arch) {
         case LLM_ARCH_QWEN35:
+        case LLM_ARCH_SENSENOVA_LOOP:
         case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_CLEF:
         case LLM_ARCH_CLOVER_MOE:
@@ -428,6 +429,9 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
     // do not quantize expert gating tensors
     // NOTE: can't use LLM_TN here because the layer number is not known
     quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;
+
+    // sensenova-loop mHC routers stay F32 (the reference keeps them in FP32)
+    quantize &= name.find(".mhc_") == std::string::npos;
 
     // do not quantize the i32 token-id -> expert-id routing table (DeepSeek-V4)
     quantize &= name.find("ffn_gate_tid2eid.weight") == std::string::npos;
@@ -1484,6 +1488,11 @@ static void init_quantize_state_counters(quantize_state_impl & qs, std::vector<t
         }
     }
     qs.n_ffn_down = qs.n_ffn_gate = qs.n_ffn_up = (int)qs.model.hparams.n_layer_all;
+    if (qs.model.hparams.loop_count > 1) {
+        // looped models store each layer once while the block count counts the visits
+        const uint32_t n_extra = (qs.model.hparams.loop_end - qs.model.hparams.loop_start) * (qs.model.hparams.loop_count - 1);
+        qs.n_ffn_down = qs.n_ffn_gate = qs.n_ffn_up = (int)(qs.model.hparams.n_layer_all - n_extra);
+    }
 }
 
 //

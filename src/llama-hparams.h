@@ -240,6 +240,18 @@ struct llama_hparams {
     uint32_t n_hrm_l_cycles = 0;
     bool     hrm_prefix_lm = false;
 
+    // sensenova-loop: physical layers [loop_start, loop_end) run loop_count times and every visit has its own
+    // cache slot (the GGUF block count is the slot count); mHC residual streams span physical [mhc_start, mhc_end)
+    uint32_t loop_start         = 0;
+    uint32_t loop_end           = 0;
+    uint32_t loop_count         = 1;
+    uint32_t mhc_start          = 0;
+    uint32_t mhc_end            = 0;
+    uint32_t mhc_streams        = 0;
+    uint32_t mhc_iters          = 0;
+    float    mhc_pre_scale      = 1.0f;
+    bool     mhc_fixed_identity = false;
+
     bool ssm_dt_b_c_rms = false;
 
     float f_clamp_kqv      = 0.0f;
@@ -522,6 +534,10 @@ struct llama_hparams {
 
     // number of effective layers (excludes nextn layers)
     uint32_t n_layer() const;
+
+    // looped models: physical layer of a cache slot, and the first slot of a physical layer (identity otherwise)
+    uint32_t loop_physical(uint32_t il) const;
+    uint32_t loop_first_slot(uint32_t ip) const;
 
     // note that this function uses different SWA parameters from those in the hparams
     // note: inlined on purpose for performance reasons

@@ -354,6 +354,25 @@ uint32_t llama_hparams::n_layer() const {
     return n_layer_all - n_layer_nextn;
 }
 
+uint32_t llama_hparams::loop_physical(uint32_t il) const {
+    const uint32_t span  = loop_end - loop_start;
+    const uint32_t extra = span * (loop_count - 1); // slots of the repeated visits
+    if (loop_count <= 1 || il < loop_end) {
+        return il;
+    }
+    if (il < loop_end + extra) {
+        return loop_start + (il - loop_end) % span;
+    }
+    return il - extra;
+}
+
+uint32_t llama_hparams::loop_first_slot(uint32_t ip) const {
+    if (loop_count <= 1 || ip < loop_end) {
+        return ip;
+    }
+    return ip + (loop_end - loop_start) * (loop_count - 1);
+}
+
 bool llama_hparams::use_mrope() const {
     return rope_sections[0] > 0 && rope_sections[1] > 0;
 }

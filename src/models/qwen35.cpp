@@ -30,6 +30,45 @@ void llama_model_qwen35::load_arch_hparams(llama_model_loader & ml) {
     }
 }
 
+void llama_model_sensenova_loop::load_arch_hparams(llama_model_loader & ml) {
+    ml.get_key(LLM_KV_LOOP_START, hparams.loop_start);
+    ml.get_key(LLM_KV_LOOP_END,   hparams.loop_end);
+    ml.get_key(LLM_KV_LOOP_COUNT, hparams.loop_count);
+    ml.get_key(LLM_KV_HYPER_CONNECTION_COUNT,               hparams.mhc_streams,        false);
+    ml.get_key(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS, hparams.mhc_iters,          false);
+    ml.get_key(LLM_KV_MHC_START,                            hparams.mhc_start,          false);
+    ml.get_key(LLM_KV_MHC_END,                              hparams.mhc_end,            false);
+    ml.get_key(LLM_KV_MHC_PRE_SCALE,                        hparams.mhc_pre_scale,      false);
+    ml.get_key(LLM_KV_MHC_FIXED_IDENTITY,                   hparams.mhc_fixed_identity, false);
+
+    // the recurrent-layer flags are per cache slot
+    llama_model_qwen35::load_arch_hparams(ml);
+
+    GGML_ASSERT(hparams.n_layer_nextn == 0 && "sensenova_loop: MTP layers are not supported");
+    GGML_ASSERT(hparams.loop_count >= 1 && hparams.loop_start < hparams.loop_end);
+    const uint32_t n_extra = (hparams.loop_end - hparams.loop_start) * (hparams.loop_count - 1);
+    GGML_ASSERT(hparams.n_layer() > n_extra);
+    const uint32_t n_phys = hparams.n_layer() - n_extra;
+    GGML_ASSERT(hparams.loop_end <= n_phys);
+    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+        // a later visit runs the same layer kind as the first one
+        GGML_ASSERT(hparams.is_recr(il) == hparams.is_recr(hparams.loop_first_slot(hparams.loop_physical(il))));
+    }
+    if (hparams.mhc_streams > 0) {
+        GGML_ASSERT(hparams.mhc_start < hparams.mhc_end && hparams.mhc_end < n_phys);
+        GGML_ASSERT(hparams.mhc_fixed_identity || hparams.mhc_iters > 0);
+        // the streams never cross a loop boundary (enter/leave are tied to physical layers)
+        const uint32_t bounds[4] = { 0, hparams.loop_start, hparams.loop_end, n_phys };
+        bool inside = false;
+        for (int k = 0; k < 3; ++k) {
+            inside |= bounds[k] <= hparams.mhc_start && hparams.mhc_end <= bounds[k + 1];
+        }
+        GGML_ASSERT(inside);
+    }
+
+    type = n_phys == 32 && hparams.n_embd == 4096 ? LLM_TYPE_9B : LLM_TYPE_UNKNOWN;
+}
+
 void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
@@ -92,6 +131,17 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
         layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
         layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+
+        // sensenova-loop mHC routers
+        const uint32_t ip = hparams.loop_physical(il);
+        if (hparams.mhc_streams > 0 && ip >= hparams.mhc_start && ip < hparams.mhc_end) {
+            const int64_t n_s   = hparams.mhc_streams;
+            const int64_t n_out = 2 * n_s + (hparams.mhc_fixed_identity ? 0 : n_s * n_s);
+            layer.mhc_attn   = create_tensor(tn(LLM_TENSOR_MHC_ATTN, "weight", il), { n_s * n_embd, n_out }, flags);
+            layer.mhc_attn_b = create_tensor(tn(LLM_TENSOR_MHC_ATTN, "bias",   il), { n_out },               flags);
+            layer.mhc_ffn    = create_tensor(tn(LLM_TENSOR_MHC_FFN,  "weight", il), { n_s * n_embd, n_out }, flags);
+            layer.mhc_ffn_b  = create_tensor(tn(LLM_TENSOR_MHC_FFN,  "bias",   il), { n_out },               flags);
+        }
     };
 
     auto load_block_mtp = [&](int il) {
@@ -120,6 +170,11 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
     };
 
     for (int i = 0; i < n_layer; ++i) {
+        // looped models: a physical layer is stored in the slot of its first visit, the later visits are
+        // aliased in llama_model::load_tensors after the generic scale pass
+        if (hparams.loop_first_slot(hparams.loop_physical(i)) != (uint32_t) i) {
+            continue;
+        }
         load_block_trunk(i, trunk_flags);
     }
     for (int i = n_layer; i < n_layer_all; ++i) {
@@ -155,9 +210,60 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
+    // sensenova-loop mHC residual streams [n_embd, n_streams, n_tokens] between mhc_start and mhc_end - 1
+    ggml_tensor * streams = nullptr;
+
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
     for (int il = 0; il < n_layer; ++il) {
         res->t_layer_inp[il] = inpL;
+
+        const uint32_t ip = hparams.loop_physical(il);
+        if (hparams.mhc_streams > 0 && ip >= hparams.mhc_start && ip < hparams.mhc_end) {
+            // mHC layer (SenseNova Loop): the attention and FFN read a weighted sum of the streams, and
+            // their outputs are added to every stream after the streams are mixed
+            const auto & layer = model.layers[il];
+            if (ip == hparams.mhc_start) {
+                // every visit enters with identical streams
+                streams = ggml_repeat_4d(ctx0, ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens),
+                        n_embd, hparams.mhc_streams, n_tokens, 1);
+            }
+            GGML_ASSERT(streams != nullptr);
+
+            ggml_tensor * post = nullptr;
+            ggml_tensor * mix  = nullptr;
+
+            cur = build_mhc_router(streams, layer.mhc_attn, layer.mhc_attn_b, &post, &mix, il);
+            cur = build_norm(cur, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+            cb(cur, "attn_norm", il);
+            ggml_build_forward_expand(gf, cur);
+            if (hparams.is_recr(il)) {
+                cur = build_layer_attn_linear(inp->get_recr(), cur, il);
+            } else {
+                cur = build_layer_attn(inp->get_attn(), cur, inp_pos, sections, il);
+            }
+            streams = build_mhc_merge(streams, cur, post, mix, il);
+
+            cur = build_mhc_router(streams, layer.mhc_ffn, layer.mhc_ffn_b, &post, &mix, il);
+            cur = build_norm(cur, layer.attn_post_norm, nullptr, LLM_NORM_RMS, il);
+            cb(cur, "attn_post_norm", il);
+            cur = build_layer_ffn(cur, il);
+            streams = build_mhc_merge(streams, cur, post, mix, il);
+            cb(streams, "mhc_streams", il);
+
+            if (ip == hparams.mhc_end - 1) {
+                // leave: mean of the streams
+                cur = nullptr;
+                for (int64_t s = 0; s < (int64_t) hparams.mhc_streams; ++s) {
+                    ggml_tensor * st = ggml_view_2d(ctx0, streams, n_embd, n_tokens, streams->nb[2], s * streams->nb[1]);
+                    cur = cur ? ggml_add(ctx0, cur, st) : ggml_cont(ctx0, st);
+                }
+                cur = ggml_scale(ctx0, cur, 1.0f / hparams.mhc_streams);
+                cb(cur, "l_out", il);
+                inpL    = cur;
+                streams = nullptr;
+            }
+            continue;
+        }
 
         ggml_tensor * inpSA = inpL;
 
@@ -234,6 +340,94 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
+}
+
+ggml_tensor * llama_model_qwen35::graph::build_mhc_router(
+        ggml_tensor *  streams,
+        ggml_tensor *  w,
+        ggml_tensor *  b,
+        ggml_tensor ** post,
+        ggml_tensor ** mix,
+        int            il) {
+    // MHCRouter.forward of the reference, in F32
+    const int64_t n_s = hparams.mhc_streams;
+    const int64_t nt  = streams->ne[2];
+    GGML_ASSERT(streams->ne[0] == n_embd && streams->ne[1] == n_s && ggml_is_contiguous(streams));
+
+    ggml_tensor * flat = ggml_rms_norm(ctx0, ggml_reshape_2d(ctx0, streams, n_s * n_embd, nt), 1e-6f);
+    ggml_tensor * logits = ggml_mul_mat(ctx0, w, flat);
+    ggml_prec_set_src(logits, GGML_PREC_F32, 1);
+    ggml_prec_set_acc(logits, GGML_PREC_F32);
+    logits = ggml_add(ctx0, logits, b);
+    cb(logits, "mhc_logits", il);
+
+    const size_t es = ggml_element_size(logits);
+    ggml_tensor * pre = ggml_cont(ctx0, ggml_view_2d(ctx0, logits, n_s, nt, logits->nb[1], 0));
+    pre = ggml_sigmoid(ctx0, pre);
+    *post = ggml_cont(ctx0, ggml_view_2d(ctx0, logits, n_s, nt, logits->nb[1], n_s * es));
+    *post = ggml_scale(ctx0, ggml_sigmoid(ctx0, *post), 2.0f);
+
+    *mix = nullptr;
+    if (!hparams.mhc_fixed_identity) {
+        // m[j + n_s*i] = mix[i][j] (i = destination stream, j = source stream). The reference normalises the
+        // logits in log space, over j then over i, mhc_iters times; here the same in linear space: a softmax
+        // over j, then alternating column and row normalisation.
+        ggml_tensor * m = ggml_cont(ctx0, ggml_view_3d(ctx0, logits, n_s, n_s, nt, n_s * es, logits->nb[1], 2 * n_s * es));
+        m = ggml_soft_max(ctx0, m);
+        auto norm_cols = [&]() {
+            ggml_tensor * col_sum = ggml_sum_rows(ctx0, ggml_cont(ctx0, ggml_permute(ctx0, m, 1, 0, 2, 3)));
+            m = ggml_div(ctx0, m, ggml_permute(ctx0, col_sum, 1, 0, 2, 3));
+        };
+        norm_cols();
+        for (uint32_t k = 1; k < hparams.mhc_iters; ++k) {
+            m = ggml_div(ctx0, m, ggml_sum_rows(ctx0, m));
+            norm_cols();
+        }
+        cb(m, "mhc_mix", il);
+        *mix = m;
+    }
+
+    // branch input = sum over the streams weighted by pre
+    ggml_tensor * branch = nullptr;
+    for (int64_t s = 0; s < n_s; ++s) {
+        ggml_tensor * st = ggml_view_2d(ctx0, streams, n_embd, nt, streams->nb[2], s * streams->nb[1]);
+        ggml_tensor * ps = ggml_view_2d(ctx0, pre, 1, nt, pre->nb[1], s * pre->nb[0]);
+        ggml_tensor * cur = ggml_mul(ctx0, st, ps);
+        branch = branch ? ggml_add(ctx0, branch, cur) : cur;
+    }
+    if (hparams.mhc_pre_scale != 1.0f) {
+        branch = ggml_scale(ctx0, branch, hparams.mhc_pre_scale);
+    }
+    cb(branch, "mhc_branch", il);
+    return branch;
+}
+
+ggml_tensor * llama_model_qwen35::graph::build_mhc_merge(
+        ggml_tensor * streams,
+        ggml_tensor * branch,
+        ggml_tensor * post,
+        ggml_tensor * mix,
+        int           il) {
+    GGML_UNUSED(il);
+    const int64_t n_s = hparams.mhc_streams;
+    const int64_t nt  = streams->ne[2];
+
+    ggml_tensor * out = nullptr;
+    for (int64_t i = 0; i < n_s; ++i) {
+        ggml_tensor * cur = ggml_mul(ctx0, branch, ggml_view_2d(ctx0, post, 1, nt, post->nb[1], i * post->nb[0]));
+        for (int64_t j = 0; j < n_s; ++j) {
+            ggml_tensor * sj = ggml_view_2d(ctx0, streams, n_embd, nt, streams->nb[2], j * streams->nb[1]);
+            if (mix) {
+                ggml_tensor * mij = ggml_view_2d(ctx0, mix, 1, nt, mix->nb[2], j * mix->nb[0] + i * mix->nb[1]);
+                cur = ggml_add(ctx0, cur, ggml_mul(ctx0, sj, mij));
+            } else if (i == j) {
+                cur = ggml_add(ctx0, cur, sj);
+            }
+        }
+        cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, nt);
+        out = out ? ggml_concat(ctx0, out, cur, 1) : cur;
+    }
+    return out;
 }
 
 std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35::graph::build_qkvz(

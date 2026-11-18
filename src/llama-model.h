@@ -673,6 +673,12 @@ struct llama_layer {
 
     struct llama_layer_nextn nextn;
 
+    // sensenova-loop mHC routers (F32): [n_streams*n_embd, 2*n_streams + n_streams^2] and their biases
+    struct ggml_tensor * mhc_attn   = nullptr;
+    struct ggml_tensor * mhc_attn_b = nullptr;
+    struct ggml_tensor * mhc_ffn    = nullptr;
+    struct ggml_tensor * mhc_ffn_b  = nullptr;
+
     struct llama_layer_switch_lora switch_lora;
 };
 
