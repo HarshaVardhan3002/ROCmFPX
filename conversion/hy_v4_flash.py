@@ -650,13 +650,55 @@ class HYV4FlashReleaseModel(HYV4FlashModel):
             out[s:s + step] = (r / scale).clamp(-fmax, fmax).to(torch.float8_e4m3fn).to(x.dtype) * scale
         return out
 
+    ENGRAM_CHUNK_ROWS = 1 << 22
+
+    def _weight_index(self) -> dict[str, str]:
+        from safetensors import safe_open
+        index_path = Path(self.dir_model) / "model.safetensors.index.json"
+        if index_path.is_file():
+            return json.loads(index_path.read_text())["weight_map"]
+        index = {}
+        for f in sorted(Path(self.dir_model).glob("*.safetensors")):
+            with safe_open(str(f), framework="numpy") as h:
+                index.update({k: f.name for k in h.keys()})
+        return index
+
+    def _engram_table_chunk(self, name: str, path: str, start: int, stop: int):
+        def load() -> np.ndarray:
+            from safetensors import safe_open
+            with safe_open(path, framework="pt") as f:
+                rows = f.get_slice(name)[start:stop]
+            # rounded in the checkpoint dtype, as the reference does in the model dtype
+            if self.hparams.get("engram_fp8_embedding"):
+                rows = self._fp8_round_rows(rows)
+            return rows.to(torch.float32).contiguous().numpy()
+        return load
+
     def modify_tensors(self, data_torch: torch.Tensor, name: str, bid: int | None) -> Iterable[tuple[str, torch.Tensor]]:
         if name.endswith(".engram_layer.lookup_table"):
             return
-        if name.endswith(".engram_layer.multi_head_embedding.embedding.weight") and self.hparams.get("engram_fp8_embedding"):
-            if isinstance(data_torch, gguf.LazyBase):
-                # evaluated when the tensor is written, one table at a time
-                data_torch = type(data_torch)._wrap_fn(self._fp8_round_rows, meta_noop=True)(data_torch)
-            else:
-                data_torch = self._fp8_round_rows(data_torch)
+        if name.endswith(".engram_layer.multi_head_embedding.embedding.weight"):
+            # every module's buckets share one table, concatenated in layer order. It is far larger
+            # than memory, so it is written in row chunks straight from the checkpoint.
+            from safetensors import safe_open
+            seen = self.__dict__.setdefault("_engram_seen", set())
+            seen.add(name)
+            names = [f"model.layers.{i - 1}.engram_layer.multi_head_embedding.embedding.weight" for i in self._engram_ids()]
+            if not all(n in seen for n in names):
+                return
+            index = self._weight_index()
+            chunks, rows, dim = [], 0, None
+            for n in names:
+                path = str(Path(self.dir_model) / index[n])
+                with safe_open(path, framework="pt") as f:
+                    n_rows, n_dim = f.get_slice(n).get_shape()
+                if dim is not None and n_dim != dim:
+                    raise ValueError(f"HY_V4_FLASH: Engram table {n} has row size {n_dim}, expected {dim}")
+                dim = n_dim
+                step = self.ENGRAM_CHUNK_ROWS
+                chunks += [self._engram_table_chunk(n, path, a, min(a + step, n_rows)) for a in range(0, n_rows, step)]
+                rows += n_rows
+            table = gguf.LazyChunkedTensor(chunks, shape=(rows, dim), dtype=np.float32)
+            yield gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD] + ".weight", table
+            return
         yield from super().modify_tensors(data_torch, name, bid)
