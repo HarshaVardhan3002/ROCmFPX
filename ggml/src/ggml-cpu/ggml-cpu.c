@@ -89,6 +89,9 @@ float ggml_table_f32_e8m0_half[1 << 8];
 float ggml_table_f32_ue4m3[1 << 8];
 // ROCmFPX UE4M3 block scales (not the same decode as ggml_table_f32_ue4m3), filled in ggml_cpu_init
 static float ggml_table_f32_rocmfpx_ue4m3[1 << 8];
+// ROCmFP4 half scales (its own decode, e > 0x7e reads as 0) and the ROCmFPX 6-bit codes, filled in ggml_cpu_init
+static float  ggml_table_f32_rocmfp4_half[1 << 8];
+static int8_t ggml_table_i8_rocmfpx_fp6[1 << 6];
 
 #if defined(__ARM_ARCH)
 struct ggml_arm_arch_features_type {
@@ -308,40 +311,6 @@ static void ggml_vec_dot_rocmfpx_fp3_q8_0(int n, float * GGML_RESTRICT s, size_t
     *s = sumf;
 }
 
-static void ggml_vec_dot_rocmfpx_fp6_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-    GGML_UNUSED(bs);
-    GGML_UNUSED(bx);
-    GGML_UNUSED(by);
-    assert(nrc == 1);
-    GGML_UNUSED(nrc);
-    assert(n % QK_ROCMFP6 == 0);
-    assert(QK_ROCMFP6 == QK8_0);
-
-    const block_rocmfp6 * GGML_RESTRICT x = (const block_rocmfp6 *) vx;
-    const block_q8_0    * GGML_RESTRICT y = (const block_q8_0 *) vy;
-
-    const int nb = n / QK_ROCMFP6;
-    float sumf = 0.0f;
-
-    for (int ib = 0; ib < nb; ++ib) {
-        const float dy = GGML_CPU_FP16_TO_FP32(y[ib].d);
-
-        int sumi0 = 0;
-        int sumi1 = 0;
-        for (int j = 0; j < QK_ROCMFP6/2; ++j) {
-            const int q0 = ggml_rocmfpx_decode_fp6_cpu(ggml_rocmfpx_get_bits_cpu(x[ib].qs, j*6, 6));
-            const int q1 = ggml_rocmfpx_decode_fp6_cpu(ggml_rocmfpx_get_bits_cpu(x[ib].qs, (j + QK_ROCMFP6/2)*6, 6));
-            sumi0 += q0 * (int) y[ib].qs[j];
-            sumi1 += q1 * (int) y[ib].qs[j + QK_ROCMFP6/2];
-        }
-
-        sumf += dy * (
-            rocmfpx_ue4m3_to_fp32(x[ib].e[0]) * (float) sumi0 +
-            rocmfpx_ue4m3_to_fp32(x[ib].e[1]) * (float) sumi1);
-    }
-
-    *s = sumf;
-}
 
 static int8_t rocmi4_nibble_i8(uint8_t nibble) {
     return (int8_t) ((nibble & 0x8u) ? (int) (nibble | 0xF0u) : (int) (nibble & 0x7u));
@@ -456,6 +425,188 @@ static void ggml_vec_dot_rocmfpx_fp8_f32(int n, float * GGML_RESTRICT s, size_t 
 #endif
 }
 
+// Q6_0_ROCMFPX, Q4_0_ROCMFP4 and Q4_0_ROCMFP4_FAST take F32 activations too, for the same reason as
+// Q8_0_ROCMFPX: rounding the activations to Q8_0 cost more than the weight format itself. On Haru-4B
+// (wiki KLD to BF16, 8 x 512 tokens) the Q6 file run as is scored 0.0236 against 0.0112 for its F16
+// expansion. The codes are decoded to int8 and dotted with the F32 activations in 16-weight halves.
+
+#if defined(__ARM_NEON) && defined(__aarch64__)
+static inline float32x4_t ggml_rocmfpx_dot16_s8_f32(int8x16_t q, const float * GGML_RESTRICT y) {
+    const int16x8_t lo = vmovl_s8(vget_low_s8(q));
+    const int16x8_t hi = vmovl_s8(vget_high_s8(q));
+    float32x4_t p0 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16 (lo))), vld1q_f32(y +  0));
+    float32x4_t p1 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo))), vld1q_f32(y +  4));
+    p0 = vfmaq_f32(p0, vcvtq_f32_s32(vmovl_s16(vget_low_s16 (hi))), vld1q_f32(y +  8));
+    p1 = vfmaq_f32(p1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi))), vld1q_f32(y + 12));
+    return vaddq_f32(p0, p1);
+}
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+static inline __m256 ggml_rocmfpx_dot16_s8_f32(const int8_t * GGML_RESTRICT q, const float * GGML_RESTRICT y) {
+    const __m256 a = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q + 0)))), _mm256_loadu_ps(y + 0));
+    return _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_loadl_epi64((const __m128i *) (q + 8)))), _mm256_loadu_ps(y + 8), a);
+}
+
+static inline float ggml_rocmfpx_hsum_f32_8(__m256 v) {
+    __m128 r = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+    r = _mm_add_ss(r, _mm_movehdup_ps(r));
+    return _mm_cvtss_f32(r);
+}
+#endif
+
+// 32 six-bit codes, a little-endian bit stream: every 3 bytes hold 4 codes
+static inline void ggml_rocmfpx_fp6_unpack(const uint8_t * GGML_RESTRICT qs, int8_t * GGML_RESTRICT q) {
+    for (int g = 0; g < QK_ROCMFP6/4; ++g) {
+        const uint32_t v = (uint32_t) qs[3*g] | (uint32_t) qs[3*g + 1] << 8 | (uint32_t) qs[3*g + 2] << 16;
+        q[4*g + 0] = ggml_table_i8_rocmfpx_fp6[(v >>  0) & 63u];
+        q[4*g + 1] = ggml_table_i8_rocmfpx_fp6[(v >>  6) & 63u];
+        q[4*g + 2] = ggml_table_i8_rocmfpx_fp6[(v >> 12) & 63u];
+        q[4*g + 3] = ggml_table_i8_rocmfpx_fp6[(v >> 18) & 63u];
+    }
+}
+
+static void ggml_vec_dot_rocmfpx_fp6_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMFP6 == 0);
+
+    const block_rocmfp6 * GGML_RESTRICT x = (const block_rocmfp6 *) vx;
+    const float         * GGML_RESTRICT y = (const float *) vy;
+
+    const int nb = n / QK_ROCMFP6;
+    int8_t q[QK_ROCMFP6];
+
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    for (int ib = 0; ib < nb; ++ib) {
+        const float * yb = y + ib*QK_ROCMFP6;
+        ggml_rocmfpx_fp6_unpack(x[ib].qs, q);
+        acc0 = vfmaq_n_f32(acc0, ggml_rocmfpx_dot16_s8_f32(vld1q_s8(q +  0), yb +  0), ggml_table_f32_rocmfpx_ue4m3[x[ib].e[0]]);
+        acc1 = vfmaq_n_f32(acc1, ggml_rocmfpx_dot16_s8_f32(vld1q_s8(q + 16), yb + 16), ggml_table_f32_rocmfpx_ue4m3[x[ib].e[1]]);
+    }
+    *s = vaddvq_f32(vaddq_f32(acc0, acc1));
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    for (int ib = 0; ib < nb; ++ib) {
+        const float * yb = y + ib*QK_ROCMFP6;
+        ggml_rocmfpx_fp6_unpack(x[ib].qs, q);
+        acc0 = _mm256_fmadd_ps(ggml_rocmfpx_dot16_s8_f32(q +  0, yb +  0), _mm256_set1_ps(ggml_table_f32_rocmfpx_ue4m3[x[ib].e[0]]), acc0);
+        acc1 = _mm256_fmadd_ps(ggml_rocmfpx_dot16_s8_f32(q + 16, yb + 16), _mm256_set1_ps(ggml_table_f32_rocmfpx_ue4m3[x[ib].e[1]]), acc1);
+    }
+    *s = ggml_rocmfpx_hsum_f32_8(_mm256_add_ps(acc0, acc1));
+#else
+    float sumf = 0.0f;
+    for (int ib = 0; ib < nb; ++ib) {
+        const float * yb = y + ib*QK_ROCMFP6;
+        ggml_rocmfpx_fp6_unpack(x[ib].qs, q);
+        float s0 = 0.0f;
+        float s1 = 0.0f;
+        for (int j = 0; j < QK_ROCMFP6/2; ++j) {
+            s0 += (float) q[j]                 * yb[j];
+            s1 += (float) q[j + QK_ROCMFP6/2] * yb[j + QK_ROCMFP6/2];
+        }
+        sumf += ggml_table_f32_rocmfpx_ue4m3[x[ib].e[0]] * s0 + ggml_table_f32_rocmfpx_ue4m3[x[ib].e[1]] * s1;
+    }
+    *s = sumf;
+#endif
+}
+
+// same values as rocmfp4_codebook in rocmfp4.c (Codebook10): low nibble = weight j, high nibble = weight j + 16
+static const int8_t ggml_rocmfp4_codebook_cpu[16] = {
+     0,  1,  2,  3,  4,  6,  8, 10,
+     0, -1, -2, -3, -4, -6, -8,-10,
+};
+
+static inline void ggml_rocmfp4_unpack(const uint8_t * GGML_RESTRICT qs, int8_t * GGML_RESTRICT q) {
+    for (int j = 0; j < QK_ROCMFP4/2; ++j) {
+        q[j]                = ggml_rocmfp4_codebook_cpu[qs[j] & 0x0f];
+        q[j + QK_ROCMFP4/2] = ggml_rocmfp4_codebook_cpu[qs[j] >> 4];
+    }
+}
+
+// both layouts: e0/e1 are the scales of the two halves (the same byte for the fast layout)
+static inline float ggml_rocmfp4_dot_f32(int nb, const uint8_t * GGML_RESTRICT base, size_t stride, int fast, const float * GGML_RESTRICT y) {
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    const int8x16_t tbl = vld1q_s8(ggml_rocmfp4_codebook_cpu);
+    const uint8x16_t m4 = vdupq_n_u8(0x0f);
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint8_t * b  = base + ib*stride;
+        const float   * yb = y + ib*QK_ROCMFP4;
+        const uint8x16_t raw = vld1q_u8(b);
+        const int8x16_t lo = vqtbl1q_s8(tbl, vandq_u8(raw, m4));
+        const int8x16_t hi = vqtbl1q_s8(tbl, vshrq_n_u8(raw, 4));
+        const uint8_t e0 = b[QK_ROCMFP4/2];
+        const uint8_t e1 = fast ? e0 : b[QK_ROCMFP4/2 + 1];
+        acc0 = vfmaq_n_f32(acc0, ggml_rocmfpx_dot16_s8_f32(lo, yb +  0), ggml_table_f32_rocmfp4_half[e0]);
+        acc1 = vfmaq_n_f32(acc1, ggml_rocmfpx_dot16_s8_f32(hi, yb + 16), ggml_table_f32_rocmfp4_half[e1]);
+    }
+    return vaddvq_f32(vaddq_f32(acc0, acc1));
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+    const __m128i tbl = _mm_loadu_si128((const __m128i *) ggml_rocmfp4_codebook_cpu);
+    const __m128i m4  = _mm_set1_epi8(0x0f);
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    int8_t q[QK_ROCMFP4];
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint8_t * b  = base + ib*stride;
+        const float   * yb = y + ib*QK_ROCMFP4;
+        const __m128i raw = _mm_loadu_si128((const __m128i *) b);
+        _mm_storeu_si128((__m128i *) (q +  0), _mm_shuffle_epi8(tbl, _mm_and_si128(raw, m4)));
+        _mm_storeu_si128((__m128i *) (q + 16), _mm_shuffle_epi8(tbl, _mm_and_si128(_mm_srli_epi16(raw, 4), m4)));
+        const uint8_t e0 = b[QK_ROCMFP4/2];
+        const uint8_t e1 = fast ? e0 : b[QK_ROCMFP4/2 + 1];
+        acc0 = _mm256_fmadd_ps(ggml_rocmfpx_dot16_s8_f32(q +  0, yb +  0), _mm256_set1_ps(ggml_table_f32_rocmfp4_half[e0]), acc0);
+        acc1 = _mm256_fmadd_ps(ggml_rocmfpx_dot16_s8_f32(q + 16, yb + 16), _mm256_set1_ps(ggml_table_f32_rocmfp4_half[e1]), acc1);
+    }
+    return ggml_rocmfpx_hsum_f32_8(_mm256_add_ps(acc0, acc1));
+#else
+    float sumf = 0.0f;
+    int8_t q[QK_ROCMFP4];
+    for (int ib = 0; ib < nb; ++ib) {
+        const uint8_t * b  = base + ib*stride;
+        const float   * yb = y + ib*QK_ROCMFP4;
+        ggml_rocmfp4_unpack(b, q);
+        const uint8_t e0 = b[QK_ROCMFP4/2];
+        const uint8_t e1 = fast ? e0 : b[QK_ROCMFP4/2 + 1];
+        float s0 = 0.0f;
+        float s1 = 0.0f;
+        for (int j = 0; j < QK_ROCMFP4/2; ++j) {
+            s0 += (float) q[j]                 * yb[j];
+            s1 += (float) q[j + QK_ROCMFP4/2] * yb[j + QK_ROCMFP4/2];
+        }
+        sumf += ggml_table_f32_rocmfp4_half[e0] * s0 + ggml_table_f32_rocmfp4_half[e1] * s1;
+    }
+    return sumf;
+#endif
+}
+
+static void ggml_vec_dot_rocmfp4_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMFP4 == 0);
+    *s = ggml_rocmfp4_dot_f32(n / QK_ROCMFP4, (const uint8_t *) vx, sizeof(block_rocmfp4), 0, (const float *) vy);
+}
+
+static void ggml_vec_dot_rocmfp4_fast_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMFP4 == 0);
+    *s = ggml_rocmfp4_dot_f32(n / QK_ROCMFP4, (const uint8_t *) vx, sizeof(block_rocmfp4_fast), 1, (const float *) vy);
+}
+
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_fp32,
@@ -493,14 +644,14 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_Q4_0_ROCMFP4] = {
         .from_float               = rocmfp4_quantize_row_q4_0,
-        .vec_dot                  = rocmfp4_vec_dot_q4_0_q8_0,
-        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .vec_dot                  = ggml_vec_dot_rocmfp4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q4_0_ROCMFP4_FAST] = {
         .from_float               = rocmfp4_quantize_row_q4_0_fast,
-        .vec_dot                  = rocmfp4_vec_dot_q4_0_fast_q8_0,
-        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .vec_dot                  = ggml_vec_dot_rocmfp4_fast_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q3_0_ROCMFPX] = {
@@ -517,8 +668,8 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_Q6_0_ROCMFPX] = {
         .from_float               = rocmfpx_quantize_row_fp6,
-        .vec_dot                  = ggml_vec_dot_rocmfpx_fp6_q8_0,
-        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .vec_dot                  = ggml_vec_dot_rocmfpx_fp6_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q8_0_ROCMFPX] = {
@@ -4190,6 +4341,18 @@ void ggml_cpu_init(void) {
             for (int i = 0; i < (1 << 8); ++i) {
                 ggml_table_f32_ue4m3[i] = ggml_ue4m3_to_fp32(i);
                 ggml_table_f32_rocmfpx_ue4m3[i] = rocmfpx_ue4m3_to_fp32(i);
+            }
+            // read back through the reference dequantizer: code 1 decodes to 1, so each weight is the half scale
+            for (int i = 0; i < (1 << 8); ++i) {
+                block_rocmfp4 b;
+                memset(b.qs, 0x11, sizeof(b.qs));
+                b.e[0] = b.e[1] = (uint8_t) i;
+                float w[QK_ROCMFP4];
+                rocmfp4_dequantize_row_q4_0(&b, w, QK_ROCMFP4);
+                ggml_table_f32_rocmfp4_half[i] = w[0];
+            }
+            for (int i = 0; i < (1 << 6); ++i) {
+                ggml_table_i8_rocmfpx_fp6[i] = (int8_t) ggml_rocmfpx_decode_fp6_cpu((uint32_t) i);
             }
 
             const uint64_t t_end = ggml_time_us(); UNUSED(t_end);
