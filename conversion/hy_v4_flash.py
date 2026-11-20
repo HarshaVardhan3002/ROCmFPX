@@ -314,7 +314,7 @@ class HYV4FlashModel(HYV4Model):
             logger.info(
                 "HY_V4_FLASH indexer: %d pooled groups of %d, keeping the best %d plus the "
                 "current group (index_topk %d)",
-                sum(self.indexer_is_full()), ratio, hparams["index_topk"] // ratio,
+                sum(self.indexer_is_full() or []), ratio, hparams["index_topk"] // ratio,
                 hparams["index_topk"])
 
         if self._engram_enabled():
@@ -698,7 +698,9 @@ class HYV4FlashReleaseModel(HYV4FlashModel):
                 step = self.ENGRAM_CHUNK_ROWS
                 chunks += [self._engram_table_chunk(n, path, a, min(a + step, n_rows)) for a in range(0, n_rows, step)]
                 rows += n_rows
-            table = gguf.LazyChunkedTensor(chunks, shape=(rows, dim), dtype=np.float32)
+            if dim is None:
+                raise ValueError("HY_V4_FLASH: no Engram tables found")
+            table = gguf.LazyChunkedTensor(chunks, shape=(rows, int(dim)), dtype=np.float32)
             yield gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD] + ".weight", table
             return
         yield from super().modify_tensors(data_torch, name, bid)
