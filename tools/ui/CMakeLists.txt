@@ -17,16 +17,19 @@ if(DEFINED LLAMA_WEBUI_HF_BUCKET)
     message(DEPRECATION "LLAMA_WEBUI_HF_BUCKET is deprecated, use LLAMA_UI_HF_BUCKET instead")
 endif()
 
-# Resolve HF asset version: explicit env var > derived from build number > unset
+# ROCmFPX: the fork's build number (its own commit count) does not match an upstream UI release, and
+# upstream's "latest" UI has a newer asset layout than this tools/ui source. Pin the prebuilt UI to the
+# upstream build this fork is based on; update it together with the next upstream merge.
+set(LLAMA_UI_HF_VERSION "b11804" CACHE STRING "Upstream UI release to download from the HF bucket")
+
+# Resolve HF asset version: explicit env var > pinned upstream release
 if(DEFINED ENV{HF_WEBUI_VERSION})
     set(HF_UI_VERSION "$ENV{HF_WEBUI_VERSION}")
     message(DEPRECATION "HF_WEBUI_VERSION env var is deprecated, use HF_UI_VERSION instead")
 elseif(DEFINED ENV{HF_UI_VERSION})
     set(HF_UI_VERSION "$ENV{HF_UI_VERSION}")
-elseif(DEFINED LLAMA_BUILD_NUMBER)
-    set(HF_UI_VERSION "b${LLAMA_BUILD_NUMBER}")
 else()
-    set(HF_UI_VERSION "")
+    set(HF_UI_VERSION "${LLAMA_UI_HF_VERSION}")
 endif()
 
 if(NOT "${HF_UI_VERSION}" STREQUAL "" AND NOT HF_UI_VERSION MATCHES "^[A-Za-z0-9._-]+$")
