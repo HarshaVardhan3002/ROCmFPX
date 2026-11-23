@@ -6844,6 +6844,11 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
             return true;
         }
     case VK_VENDOR_ID_AMD:
+        // IQ1: the float path copies the 4 KB grid into shared memory per workgroup, which short MoE expert rows
+        // (k < 2048) do not amortize; MMVQ is 1.3-1.75x faster there on the 8060S (RDNA3.5)
+        if (src0_type == GGML_TYPE_IQ1_S || src0_type == GGML_TYPE_IQ1_M) {
+            return true;
+        }
         if (k < 2048) {
             return false;
         }
