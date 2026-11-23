@@ -347,6 +347,9 @@ struct llama_hparams {
     // Shared indexers reuse top-k from previous full layer
     std::array<uint32_t, LLAMA_MAX_LAYERS> is_indexer_full_impl;
 
+    // layer il reads the KV cache of layer kv_source_impl[il] (own cache if equal to il)
+    std::array<uint32_t, LLAMA_MAX_LAYERS> kv_source_impl;
+
     // DeepSeek-V4
     uint32_t dsv4_o_group_count        = 0;
     uint32_t dsv4_o_lora_rank          = 0;
@@ -529,6 +532,9 @@ struct llama_hparams {
     uint32_t n_embd_head_v_mla() const;
 
     bool has_kv(uint32_t il) const;
+
+    // the layer whose KV cache layer il reads
+    uint32_t kv_source(uint32_t il) const;
 
     bool has_rope(uint32_t il) const;
 

@@ -1468,6 +1468,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
     std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
     std::fill(hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.end(), 0);
+    std::iota(hparams.kv_source_impl.begin(), hparams.kv_source_impl.end(), 0);
 
     std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
     std::fill(hparams.xielu_alpha_p.begin(), hparams.xielu_alpha_p.end(), 0.0f);
@@ -3265,6 +3266,18 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                             return -1;
                         };
+                    }
+
+                    // Kolibri-1.1: layers without K/V projections read the cache of their source layer
+                    if (arch == LLM_ARCH_KOLIBRI1) {
+                        reuse = [&](uint32_t il) {
+                            return hparams.has_kv(il) ? -1 : (int32_t) hparams.kv_source(il);
+                        };
+                    }
+
+                    // the Kolibri-1.1 sparse attention inputs hold the cells of a single stream
+                    if (arch == LLM_ARCH_KOLIBRI1 && hparams.indexer_top_k > 0 && !cparams.kv_unified && cparams.n_seq_max > 1) {
+                        throw std::runtime_error("Kolibri-1.1 sparse attention with several sequences requires a unified KV cache (--kv-unified)");
                     }
 
                     if (mtp_on_hybrid_qwen || mtp_on_hybrid_nemotron) {

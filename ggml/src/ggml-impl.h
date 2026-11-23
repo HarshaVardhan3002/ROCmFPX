@@ -608,6 +608,65 @@ static inline uint8_t ggml_fp32_to_e4m3(float x) {
     return sign | (uint8_t) ((E << 3) | m);
 }
 
+// OCP FP8 E4M3 (signed), used by GGML_OP_ROUND_NVFP4
+static inline float ggml_f8_e4m3_to_fp32(uint8_t x) {
+    const uint8_t ax = x & 0x7F;
+    if (ax == 0x7F) {
+        // OCP FP8 defines both 0x7F and 0xFF as NaN; the sign need not be preserved.
+        return NAN;
+    }
+
+    const uint32_t exp = (ax >> 3) & 0xF;
+    const uint32_t man = ax & 0x7;
+    // OCP FP8 rev. 1.1, section 5.1: subnormal magnitude = M * 2^-9; normal magnitude = (1 + M / 8) * 2^(E - 7).
+    // a normal value maps to fp32 exponent E + 120 and the top 3 mantissa bits
+    const float value = exp == 0
+        ? (float) man * (1.0f / 512.0f)
+        : fp32_from_bits(((exp + 120) << 23) | (man << 20));
+    // set the sign bit without a branch, the sign of real data is random
+    return fp32_from_bits(fp32_to_bits(value) | ((uint32_t) (x & 0x80) << 24));
+}
+
+static inline int ggml_round_to_nearest_even(float x) {
+    const int value = (int) floorf(x);
+    const float fraction = x - value;
+    return fraction > 0.5f || (fraction == 0.5f && (value & 1)) ? value + 1 : value;
+}
+
+// Supports saturating conversion only; infinities and overflow clamp to +/-448.
+static inline uint8_t ggml_fp32_to_f8_e4m3(float x) {
+    const uint8_t sign = signbit(x) ? 0x80 : 0;
+    x = fabsf(x);
+
+    if (isnan(x)) {
+        // OCP FP8 leaves NaN sign handling to the implementation; use canonical 0x7F.
+        return 0x7F;
+    }
+    if (x == 0.0f) {
+        return sign;
+    }
+    if (isinf(x) || x >= 448.0f) {
+        return sign | 0x7E;
+    }
+    if (x < 0.015625f) {
+        // OCP FP8 rev. 1.1, section 5.1: subnormal magnitude = M * 2^(1 - bias - m) = M / 512.
+        return sign | (uint8_t) ggml_round_to_nearest_even(x * 512.0f);
+    }
+
+    int exp;
+    const float mantissa = frexpf(x, &exp) * 2.0f;
+    int encoded_exp = exp + 6;
+    int encoded_man = ggml_round_to_nearest_even((mantissa - 1.0f) * 8.0f);
+    if (encoded_man == 8) {
+        encoded_man = 0;
+        encoded_exp++;
+    }
+    if (encoded_exp > 15 || (encoded_exp == 15 && encoded_man > 6)) {
+        return sign | 0x7E;
+    }
+    return sign | (uint8_t) (encoded_exp << 3) | (uint8_t) encoded_man;
+}
+
 /**
  * Converts brain16 to float32.
  *

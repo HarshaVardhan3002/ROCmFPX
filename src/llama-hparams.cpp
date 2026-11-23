@@ -333,7 +333,15 @@ bool llama_hparams::has_kv(uint32_t il) const {
     }
 
     // by default, all layers have kv
-    return true;
+    return kv_source(il) == il;
+}
+
+uint32_t llama_hparams::kv_source(uint32_t il) const {
+    if (il < n_layer_all) {
+        return kv_source_impl[il];
+    }
+
+    GGML_ABORT("%s: il (%u) out of bounds (n_layer_all: %u)\n", __func__, il, n_layer_all);
 }
 
 bool llama_hparams::has_rope(uint32_t il) const {

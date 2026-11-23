@@ -213,6 +213,7 @@ class Keys:
         COMPRESS_RATIOS              = "{arch}.attention.compress_ratios"
         COMPRESS_ROPE_FREQ_BASE      = "{arch}.attention.compress_rope_freq_base"
         KV_SOURCE_LAYERS             = "{arch}.attention.kv_source_layers"
+        KV_SOURCE_MAP                = "{arch}.attention.kv_source_map"
         TEMPERATURE_LENGTH           = "{arch}.attention.temperature_length"
         KEY_LENGTH_MLA               = "{arch}.attention.key_length_mla"
         VALUE_LENGTH_MLA             = "{arch}.attention.value_length_mla"
@@ -6366,6 +6367,9 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_K_NORM,
         MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.FFN_POST_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_GATE_INP,
         MODEL_TENSOR.FFN_EXP_PROBS_B,
         MODEL_TENSOR.FFN_GATE_EXP,
