@@ -261,7 +261,11 @@ static int rocmfpx_qmax_log2(ggml_type type) {
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return 4;
         case GGML_TYPE_Q4_0_ROCMI4:       return 3;
         case GGML_TYPE_Q3_0_ROCMFPX:
-        case GGML_TYPE_Q2_0_ROCMFPX:      return 2;
+        case GGML_TYPE_Q2_0_ROCMFPX:
+        case GGML_TYPE_Q2_0_ROCMFPL:      return 2;
+        case GGML_TYPE_Q1_0_ROCMFPT:      return 0;
+        case GGML_TYPE_ROCMIQ2_XXS:       return 3;
+        case GGML_TYPE_ROCMIQ1_S:         return 2;
         default:                          return -1;
     }
 }
@@ -570,6 +574,10 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_Q6_0_ROCMFPX:
             case GGML_TYPE_Q8_0_ROCMFPX: return_type = GGML_TYPE_Q8_0; break;
             case GGML_TYPE_Q4_0_ROCMI4: return_type = GGML_TYPE_Q4_0; break;
+            case GGML_TYPE_Q2_0_ROCMFPL:
+            case GGML_TYPE_Q1_0_ROCMFPT:
+            case GGML_TYPE_ROCMIQ2_XXS:
+            case GGML_TYPE_ROCMIQ1_S:    return_type = GGML_TYPE_Q2_0_ROCMFPX; break;
             case GGML_TYPE_Q4_K:    return_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:    return_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:    return_type = GGML_TYPE_Q8_0;   break;
@@ -1414,6 +1422,10 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN: return GGML_TYPE_Q4_0_ROCMFP4_FAST;
         case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX: return GGML_TYPE_Q3_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX: return GGML_TYPE_Q2_0_ROCMFPX;
+        case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPL: return GGML_TYPE_Q2_0_ROCMFPL;
+        case LLAMA_FTYPE_MOSTLY_Q1_0_ROCMFPT: return GGML_TYPE_Q1_0_ROCMFPT;
+        case LLAMA_FTYPE_MOSTLY_ROCMIQ2_XXS:  return GGML_TYPE_ROCMIQ2_XXS;
+        case LLAMA_FTYPE_MOSTLY_ROCMIQ1_S:    return GGML_TYPE_ROCMIQ1_S;
         case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX: return GGML_TYPE_Q6_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_LEAN: return GGML_TYPE_Q6_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX: return GGML_TYPE_Q8_0_ROCMFPX;

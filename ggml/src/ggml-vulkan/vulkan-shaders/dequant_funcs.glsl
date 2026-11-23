@@ -574,6 +574,87 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
 }
 #endif
 
+#if defined(DATA_A_ROCMFPL)
+vec2 dequantize(uint ib, uint iqs, uint a_offset) {
+    const uint packed = uint(data_a[a_offset + ib].qs[iqs >> 2u]);
+    const uint sh = 2u * (iqs & 3u);
+    const float d = ue4m3_to_fp32(data_a[a_offset + ib].e[iqs >> 6u]);
+    return vec2(float(kvalues_rocmfpx_fp2_const[(packed >> sh) & 3u]),
+                float(kvalues_rocmfpx_fp2_const[(packed >> (sh + 2u)) & 3u])) * d;
+}
+
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    const uint packed = uint(data_a[a_offset + ib].qs[iqs >> 2u]);
+    const float d = ue4m3_to_fp32(data_a[a_offset + ib].e[iqs >> 6u]);
+    return vec4(float(kvalues_rocmfpx_fp2_const[ packed        & 3u]),
+                float(kvalues_rocmfpx_fp2_const[(packed >> 2u) & 3u]),
+                float(kvalues_rocmfpx_fp2_const[(packed >> 4u) & 3u]),
+                float(kvalues_rocmfpx_fp2_const[(packed >> 6u) & 3u])) * d;
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+vec4 rocmiq2_dequant4(uint ib, uint iqs, uint a_offset) {
+    vec4 lo, hi;
+    rocmiq2_code8(uint(data_a[a_offset + ib].qs[iqs >> 3u]), lo, hi);
+    const float d = rocmiq_sub_scale(uint(data_a[a_offset + ib].sc), iqs >> 6u) * 0.125;
+    return ((iqs & 4u) != 0u ? hi : lo) * d;
+}
+
+vec2 dequantize(uint ib, uint iqs, uint a_offset) {
+    const vec4 v = rocmiq2_dequant4(ib, iqs & ~3u, a_offset);
+    return (iqs & 2u) != 0u ? v.zw : v.xy;
+}
+
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    return rocmiq2_dequant4(ib, iqs, a_offset);
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+vec4 rocmiq1_dequant4(uint ib, uint iqs, uint a_offset) {
+    const uint i = iqs >> 2u;
+    const uint ci = ((uint(data_a[a_offset + ib].ql[i >> 1u]) >> (4u * (i & 1u))) & 15u) |
+                    (((uint(data_a[a_offset + ib].qh[i >> 2u]) >> (2u * (i & 3u))) & 3u) << 4u);
+    return rocmiq1_cb4(ci) * (rocmiq_sub_scale(uint(data_a[a_offset + ib].sc), iqs >> 6u) * 0.03125);
+}
+
+vec2 dequantize(uint ib, uint iqs, uint a_offset) {
+    const vec4 v = rocmiq1_dequant4(ib, iqs & ~3u, a_offset);
+    return (iqs & 2u) != 0u ? v.zw : v.xy;
+}
+
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    return rocmiq1_dequant4(ib, iqs, a_offset);
+}
+#endif
+
+#if defined(DATA_A_ROCMFPT)
+uint rocmfpt_byte(uint ib, uint slot, uint a_offset) {
+    return slot < 48u ? uint(data_a[a_offset + ib].qs[slot]) : uint(data_a[a_offset + ib].qh[slot - 48u]);
+}
+
+float rocmfpt_dequant1(uint ib, uint w, uint a_offset) {
+    uint slot, n;
+    rocmfpt_pos(w, slot, n);
+    return float(rocmfpt_trit(rocmfpt_byte(ib, slot, a_offset), n)) * ue4m3_to_fp32(data_a[a_offset + ib].e[w >> 6u]);
+}
+
+vec2 dequantize(uint ib, uint iqs, uint a_offset) {
+    return vec2(rocmfpt_dequant1(ib, iqs, a_offset), rocmfpt_dequant1(ib, iqs + 1u, a_offset));
+}
+
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    uint slot, n;
+    rocmfpt_pos(iqs, slot, n);
+    const float d = ue4m3_to_fp32(data_a[a_offset + ib].e[iqs >> 6u]);
+    return vec4(float(rocmfpt_trit(rocmfpt_byte(ib, slot + 0u, a_offset), n)),
+                float(rocmfpt_trit(rocmfpt_byte(ib, slot + 1u, a_offset), n)),
+                float(rocmfpt_trit(rocmfpt_byte(ib, slot + 2u, a_offset), n)),
+                float(rocmfpt_trit(rocmfpt_byte(ib, slot + 3u, a_offset), n))) * d;
+}
+#endif
+
 #if defined(DATA_A_ROCMFPX_FP3)
 uint rocmfpx_fp3_get_bits(uint ib, uint bit_pos, uint a_offset) {
     uint code = 0u;

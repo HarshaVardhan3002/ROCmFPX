@@ -79,6 +79,50 @@ vec4 rocmfpx_mm_fp2_vec4(uint ib, uint idx) {
 }
 #endif
 
+#if defined(DATA_A_ROCMFPL)
+vec4 rocmfpl_mm_vec4(uint ib, uint idx) {
+    const uint packed = uint(data_a[ib].qs[idx >> 2u]);
+    const vec4 q = vec4(kvalues_rocmfpx_fp2_const[ packed        & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 2u) & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 4u) & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 6u) & 3u]);
+    return q * ue4m3_to_fp32(data_a[ib].e[idx >> 6u]);
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+vec4 rocmiq2_mm_vec4(uint ib, uint idx) {
+    vec4 lo, hi;
+    rocmiq2_code8(uint(data_a[ib].qs[idx >> 3u]), lo, hi);
+    return ((idx & 4u) != 0u ? hi : lo) * (rocmiq_sub_scale(uint(data_a[ib].sc), idx >> 6u) * 0.125);
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+vec4 rocmiq1_mm_vec4(uint ib, uint idx) {
+    const uint i = idx >> 2u;
+    const uint ci = ((uint(data_a[ib].ql[i >> 1u]) >> (4u * (i & 1u))) & 15u) |
+                    (((uint(data_a[ib].qh[i >> 2u]) >> (2u * (i & 3u))) & 3u) << 4u);
+    return rocmiq1_cb4(ci) * (rocmiq_sub_scale(uint(data_a[ib].sc), idx >> 6u) * 0.03125);
+}
+#endif
+
+#if defined(DATA_A_ROCMFPT)
+uint rocmfpt_mm_byte(uint ib, uint slot) {
+    return slot < 48u ? uint(data_a[ib].qs[slot]) : uint(data_a[ib].qh[slot - 48u]);
+}
+
+vec4 rocmfpt_mm_vec4(uint ib, uint idx) {
+    uint slot, n;
+    rocmfpt_pos(idx, slot, n);
+    const vec4 q = vec4(rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 0u), n),
+                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 1u), n),
+                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 2u), n),
+                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 3u), n));
+    return q * ue4m3_to_fp32(data_a[ib].e[idx >> 6u]);
+}
+#endif
+
 #if defined(DATA_A_ROCMFPX_FP3)
 int32_t rocmfpx_mm_fp3_pack4_window(uint ib, uint idx) {
     const uint bit_pos = idx * 3u;
@@ -447,6 +491,25 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 #endif
 #elif defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
     store_a_raw(fetch_a_raw(pos_a, row, col), row, col);
+#elif defined(DATA_A_ROCMFPL) || defined(DATA_A_ROCMFPT) || defined(DATA_A_ROCMIQ2_XXS) || defined(DATA_A_ROCMIQ1_S)
+    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+    const uint k_pair = row * LOAD_VEC_A / 2;
+
+    const uint ib = idx / 64;
+    const uint iqs = (idx & 63u) * 4;
+
+#if defined(DATA_A_ROCMFPL)
+    const vec4 v = rocmfpl_mm_vec4(ib, iqs);
+#elif defined(DATA_A_ROCMIQ2_XXS)
+    const vec4 v = rocmiq2_mm_vec4(ib, iqs);
+#elif defined(DATA_A_ROCMIQ1_S)
+    const vec4 v = rocmiq1_mm_vec4(ib, iqs);
+#else
+    const vec4 v = rocmfpt_mm_vec4(ib, iqs);
+#endif
+
+    store_a(col, k_pair, FLOAT_TYPEV2(v.xy));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(v.zw));
 #elif defined(DATA_A_ROCMFPX_FP2) || defined(DATA_A_ROCMFPX_FP3) || defined(DATA_A_ROCMFPX_FP6) || defined(DATA_A_ROCMFPX_FP8)
     const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
     const uint k_pair = row * LOAD_VEC_A / 2;

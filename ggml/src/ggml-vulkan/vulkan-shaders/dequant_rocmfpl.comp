@@ -1,0 +1,26 @@
+#version 450
+
+#include "dequant_head.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A {block_rocmfpl data_a[];};
+layout (binding = 1) writeonly buffer D {D_TYPE data_b[];};
+
+void main() {
+    init_iq_shmem(gl_WorkGroupSize);
+
+    const uint ib = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.x / 16;
+    if (ib >= p.nel / 256) {
+        return;
+    }
+
+    const uint w = 16 * (gl_LocalInvocationID.x % 16);
+    const uint b_idx = 256 * ib + w;
+    const float d = ue4m3_to_fp32(data_a[ib].e[w >> 6u]);
+
+    [[unroll]] for (uint l = 0; l < 16; ++l) {
+        const uint packed = uint(data_a[ib].qs[(w + l) >> 2u]);
+        data_b[b_idx + l] = D_TYPE(d * float(kvalues_rocmfpx_fp2_const[(packed >> (2u * ((w + l) & 3u))) & 3u]));
+    }
+}

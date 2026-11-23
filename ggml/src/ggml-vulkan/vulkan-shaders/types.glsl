@@ -982,7 +982,7 @@ void init_iq_shmem(uvec3 wgsize)
 #endif
 #endif
 
-#if defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S)
+#if defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S) || defined(DATA_A_ROCMIQ2_XXS)
 #if defined(DATA_A_IQ2_S)
 shared uvec2 iq2s_grid[1024];
 #elif defined(DATA_A_IQ2_XS)
@@ -1007,7 +1007,7 @@ struct block_iq2_xxs_packed16
     uint16_t qs[QUANT_K_IQ2_XXS/8];
 };
 
-#if defined(DATA_A_IQ2_XXS)
+#if defined(DATA_A_IQ2_XXS) || defined(DATA_A_ROCMIQ2_XXS)
 
 const uvec2[256] iq2xxs_grid_const = {
     uvec2(0x08080808, 0x08080808), uvec2(0x0808082b, 0x08080808), uvec2(0x08081919, 0x08080808), uvec2(0x08082b08, 0x08080808),
@@ -1940,7 +1940,95 @@ struct block_rocmfpx_fp8
 #define A_TYPE block_rocmfpx_fp8
 #endif
 
-#if defined(DATA_A_ROCMFPX_FP2) || defined(DATA_A_ROCMFPX_FP3) || defined(DATA_A_ROCMFPX_FP6) || defined(DATA_A_ROCMFPX_FP8)
+// ROCmFP2-L: 256 S40 2-bit codes, one UE4M3 scale per 64 weights
+struct block_rocmfpl
+{
+    uint8_t qs[64];
+    uint8_t e[4];
+};
+
+// ROCmFP-T: 256 trits in TQ1_0 packing, one UE4M3 scale per 64 weights
+struct block_rocmfpt
+{
+    uint8_t qs[48];
+    uint8_t qh[4];
+    uint8_t e[4];
+};
+
+struct block_rocmfpl_packed32
+{
+    uint32_t qs[16];
+    uint32_t e;
+};
+
+#if defined(DATA_A_ROCMFPL)
+#define QUANT_K 256
+#define QUANT_R 1
+#define QUANT_AUXF 1
+#define A_TYPE block_rocmfpl
+#define A_TYPE_PACKED32 block_rocmfpl_packed32
+#endif
+
+#if defined(DATA_A_ROCMFPT)
+#define QUANT_K 256
+#define QUANT_R 1
+#define QUANT_AUXF 1
+#define A_TYPE block_rocmfpt
+#endif
+
+
+// ROCmIQ2_XXS: 16-bit scale word (UE4M3 d in bits 0-7, 2-bit sub exponent per 64 in bits 8-15) and one 16-bit code
+// per 8 weights (iq2xxs grid index, 7 signs + even parity, shift bit)
+struct block_rocmiq2_xxs
+{
+    uint16_t sc;
+    uint16_t qs[32];
+};
+
+// ROCmIQ1_S: same scale word, one 6-bit index per 4 weights into a fixed 64 x 4 int8 codebook
+struct block_rocmiq1_s
+{
+    uint16_t sc;
+    uint8_t ql[32];
+    uint8_t qh[16];
+};
+
+struct block_rocmiq1_s_packed16
+{
+    uint16_t sc;
+    uint16_t ql[16];
+    uint16_t qh[8];
+};
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+#define QUANT_K 256
+#define QUANT_R 1
+#define QUANT_AUXF 1
+#define A_TYPE block_rocmiq2_xxs
+#define A_TYPE_PACKED16 block_rocmiq2_xxs
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+#define QUANT_K 256
+#define QUANT_R 1
+#define QUANT_AUXF 1
+#define A_TYPE block_rocmiq1_s
+#define A_TYPE_PACKED16 block_rocmiq1_s_packed16
+shared uint rocmiq1_cb[64];
+const uint rocmiq1_cb_const[64] = {
+    0xfbf5dc83u, 0xdc0e3396u, 0x361c18a3u, 0x2dc733a8u, 0x384cceb3u, 0x4edddeb5u, 0xdd4ad3b6u, 0xae01d7bau,
+    0xc6a1fbbau, 0xfbe1fabdu, 0x05059dbfu, 0x02532bc4u, 0xe5bb51cdu, 0x15adbfd1u, 0xa9ed2cd5u, 0xab4a20d6u,
+    0x3b1f60d7u, 0xe018ffd9u, 0x07fc32dbu, 0x1c21e9dcu, 0x6d1afce7u, 0xdf1370eau, 0x2d9911ebu, 0xc4c7aeedu,
+    0x5101aaf1u, 0xe5c605f1u, 0xfaf2cdf3u, 0x2be401f3u, 0x495f12f4u, 0x66df30f6u, 0xcb289dfbu, 0xf072efffu,
+    0x81f0eb05u, 0x284bac0bu, 0xe428260au, 0x261e1b0bu, 0x23d0690bu, 0xc9f8fb0fu, 0xf129df11u, 0x035c5215u,
+    0x59bfd617u, 0xfde62d17u, 0xa73fe019u, 0x11eb8e1du, 0xf9912e1fu, 0x2c0bdb21u, 0xa1214120u, 0xb9cd4920u,
+    0xb3abf523u, 0x05d3e924u, 0x0395c829u, 0x491e4a34u, 0x6b19ec3du, 0x2956fc3du, 0xfc0b053eu, 0xc9ebb940u,
+    0x3fcd1f43u, 0xf4075b4au, 0xd752194du, 0xf137bb57u, 0xb500075eu, 0x25e6c764u, 0xefc31365u, 0x1f181579u,
+};
+#endif
+
+#if defined(DATA_A_ROCMFPX_FP2) || defined(DATA_A_ROCMFPX_FP3) || defined(DATA_A_ROCMFPX_FP6) || defined(DATA_A_ROCMFPX_FP8) || defined(DATA_A_ROCMFPL) || defined(DATA_A_ROCMFPT) || \
+    defined(DATA_A_ROCMIQ2_XXS) || defined(DATA_A_ROCMIQ1_S)
 #define DATA_A_ROCMFPX_FAMILY
 #endif
 
@@ -2124,6 +2212,16 @@ void init_iq_shmem(uvec3 wgsize)
     for (uint i = gl_LocalInvocationIndex.x; i < rocmfpx_ue4m3_fp32_lut.length(); i += wgsize.x) {
         rocmfpx_ue4m3_fp32_lut[i] = rocmfpx_ue4m3_to_fp32_build(i);
     }
+#if defined(DATA_A_ROCMIQ2_XXS)
+    for (uint i = gl_LocalInvocationIndex.x; i < iq2xxs_grid.length(); i += wgsize.x) {
+        iq2xxs_grid[i] = iq2xxs_grid_const[i];
+    }
+#endif
+#if defined(DATA_A_ROCMIQ1_S)
+    for (uint i = gl_LocalInvocationIndex.x; i < rocmiq1_cb.length(); i += wgsize.x) {
+        rocmiq1_cb[i] = rocmiq1_cb_const[i];
+    }
+#endif
 #endif
     barrier();
 }
@@ -2173,6 +2271,38 @@ float ue4m3_to_fp32(uint8_t x) {
 }
 #endif
 
+#if defined(DATA_A_ROCMIQ2_XXS) || defined(DATA_A_ROCMIQ1_S)
+// sub scale of 64-weight group g: d * 2^(-k/2), same float ops as the CPU reference
+float rocmiq_sub_scale(uint sc, uint g) {
+    const uint k = (sc >> (8u + 2u * g)) & 3u;
+    return ue4m3_to_fp32(uint8_t(sc & 0xFFu)) * (((k & 1u) != 0u ? 0.70710678118654752 : 1.0) * ((k & 2u) != 0u ? 0.5 : 1.0));
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+// the 8 integer values of one code word: +/-grid + shift (raw units, value = q * sub_scale / 8)
+void rocmiq2_code8(uint code, out vec4 lo, out vec4 hi) {
+    const uvec2 g = iq2xxs_grid[code & 0xFFu];
+    const uint s7 = (code >> 8u) & 0x7Fu;
+    const uint signs = s7 | ((uint(bitCount(s7)) & 1u) << 7u);
+    const float sh = (code & 0x8000u) != 0u ? -4.0 : 4.0;
+    const vec4 m0 = vec4(uvec4(g.x, g.x >> 8u, g.x >> 16u, g.x >> 24u) & 0xFFu);
+    const vec4 m1 = vec4(uvec4(g.y, g.y >> 8u, g.y >> 16u, g.y >> 24u) & 0xFFu);
+    const vec4 s0 = vec4(1.0) - 2.0 * vec4(uvec4(signs, signs >> 1u, signs >> 2u, signs >> 3u) & 1u);
+    const vec4 s1 = vec4(1.0) - 2.0 * vec4(uvec4(signs >> 4u, signs >> 5u, signs >> 6u, signs >> 7u) & 1u);
+    lo = m0 * s0 + sh;
+    hi = m1 * s1 + sh;
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+// codebook entry ci as 4 signed integers (value = q * sub_scale / 32)
+vec4 rocmiq1_cb4(uint ci) {
+    const int v = int(rocmiq1_cb[ci]);
+    return vec4(bitfieldExtract(v, 0, 8), bitfieldExtract(v, 8, 8), bitfieldExtract(v, 16, 8), bitfieldExtract(v, 24, 8));
+}
+#endif
+
 #if defined(DATA_A_NVFP4)
 #if defined(USE_OCP_FP4)
 floate4m3_t ue4m3_from_bits(uint8_t x) {
@@ -2196,6 +2326,29 @@ float ue4m3_to_fp32(uint8_t x) {
 const int8_t kvalues_rocmfpx_fp2_const[4] = {
     int8_t(-4), int8_t(-1), int8_t(1), int8_t(4)
 };
+
+#if defined(DATA_A_ROCMFPT)
+const uint rocmfpt_pow3[5] = { 1u, 3u, 9u, 27u, 81u };
+
+// trit n of a base-3 byte, in -1..1
+int rocmfpt_trit(uint v, uint n) {
+    return int((((v * rocmfpt_pow3[n]) & 255u) * 3u) >> 8) - 1;
+}
+
+// byte slot (0..47 = qs, 48..51 = qh) and plane of weight w; 4 aligned weights share the plane
+void rocmfpt_pos(uint w, out uint slot, out uint n) {
+    if (w < 160u) {
+        slot = w & 31u;
+        n = w >> 5;
+    } else if (w < 240u) {
+        slot = 32u + ((w - 160u) & 15u);
+        n = (w - 160u) >> 4;
+    } else {
+        slot = 48u + ((w - 240u) & 3u);
+        n = (w - 240u) >> 2;
+    }
+}
+#endif
 
 const int8_t kvalues_rocmfpx_fp3_const[8] = {
     int8_t(0), int8_t(1), int8_t(2), int8_t(4),

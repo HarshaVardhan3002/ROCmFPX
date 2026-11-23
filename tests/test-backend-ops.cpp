@@ -9954,6 +9954,7 @@ static const ggml_type all_types[] = {
     GGML_TYPE_MXFP4, GGML_TYPE_NVFP4,
     GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4,
     GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
+    GGML_TYPE_Q2_0_ROCMFPL, GGML_TYPE_Q1_0_ROCMFPT, GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_ROCMIQ1_S,
     GGML_TYPE_Q2_K, GGML_TYPE_Q3_K,
     GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
     GGML_TYPE_Q6_K,
@@ -9974,6 +9975,7 @@ static const ggml_type base_types[] = {
     GGML_TYPE_Q4_K,
     GGML_TYPE_MXFP4, GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_Q4_0_ROCMFP4_FAST, GGML_TYPE_Q4_0_ROCMI4, GGML_TYPE_NVFP4, // TODO: or "other"
     GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q6_0_ROCMFPX, GGML_TYPE_Q8_0_ROCMFPX,
+    GGML_TYPE_Q2_0_ROCMFPL, GGML_TYPE_Q1_0_ROCMFPT, GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_ROCMIQ1_S,
     GGML_TYPE_IQ2_XXS
 };
 
@@ -11512,7 +11514,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // several minutes per case on WebGPU.
     for (int bs : {1, 4, 32, 128}) {
         for (ggml_type type_a : {
-                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX}) {
+                GGML_TYPE_Q2_0_ROCMFPX, GGML_TYPE_Q3_0_ROCMFPX, GGML_TYPE_Q2_0_ROCMFPL, GGML_TYPE_Q1_0_ROCMFPT}) {
             test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 1536, bs, 4096));
             test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 192, 8, false, 4096, bs, 1536));
         }
@@ -12524,6 +12526,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 // Test cases for performance evaluation: should be representative of real-world use cases
 static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
+
+    // G0 (ROCmIQ study): low-bit MUL_MAT_ID token generation vs row length k. 32M weights per expert so the
+    // 8 used experts (~66 MB at 2 bpw) do not fit the 32 MB Infinity Cache; then the real LingSante expert shapes.
+    for (ggml_type type_a : {GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M, GGML_TYPE_IQ2_XXS, GGML_TYPE_Q2_0_ROCMFPX,
+                             GGML_TYPE_Q2_0_ROCMFPL, GGML_TYPE_Q1_0_ROCMFPT, GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_ROCMIQ1_S}) {
+        for (int64_t k : {512, 1024, 2048, 4096, 8192}) {
+            test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 8, 8, false, (32LL << 20) / k, 1, k));
+        }
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 512, 8, false, 1280, 1, 4096));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 512, 8, false, 4096, 1, 1280));
+    }
 
     // DeepSeek-V4.1 prompt processing at depth: raw window (128 + ubatch, padded to 768) + n_comp compressed rows,
     // 64 heads sharing one 512-wide K=V head, 512 queries per ubatch; the indexer (32 heads) picks the top 512 rows

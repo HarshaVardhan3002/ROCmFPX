@@ -92,6 +92,8 @@ static float ggml_table_f32_rocmfpx_ue4m3[1 << 8];
 // ROCmFP4 half scales (its own decode, e > 0x7e reads as 0) and the ROCmFPX 6-bit codes, filled in ggml_cpu_init
 static float  ggml_table_f32_rocmfp4_half[1 << 8];
 static int8_t ggml_table_i8_rocmfpx_fp6[1 << 6];
+// ROCmFP2-L: one code byte -> 4 int8 S40 values
+static int8_t ggml_table_i8x4_rocmfpl[1 << 8][4];
 
 #if defined(__ARM_ARCH)
 struct ggml_arm_arch_features_type {
@@ -516,6 +518,185 @@ static void ggml_vec_dot_rocmfpx_fp6_f32(int n, float * GGML_RESTRICT s, size_t 
 #endif
 }
 
+// ROCmFP2-L and ROCmFP-T: each 256-weight block is decoded to int8 codes, then dotted in 16-weight pieces
+// with one UE4M3 scale per 64 weights
+
+static inline float ggml_rocmfpx_dot256_g64_f32(const int8_t * GGML_RESTRICT q, const uint8_t * GGML_RESTRICT e, const float * GGML_RESTRICT y) {
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    for (int g = 0; g < QK_ROCMFPL/QG_ROCMFPX; ++g) {
+        const int8_t * qg = q + g*QG_ROCMFPX;
+        const float  * yg = y + g*QG_ROCMFPX;
+        const float32x4_t a = vaddq_f32(vaddq_f32(ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg +  0), yg +  0), ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 16), yg + 16)),
+                                        vaddq_f32(ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 32), yg + 32), ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 48), yg + 48)));
+        acc = vfmaq_n_f32(acc, a, ggml_table_f32_rocmfpx_ue4m3[e[g]]);
+    }
+    return vaddvq_f32(acc);
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+    __m256 acc = _mm256_setzero_ps();
+    for (int g = 0; g < QK_ROCMFPL/QG_ROCMFPX; ++g) {
+        const int8_t * qg = q + g*QG_ROCMFPX;
+        const float  * yg = y + g*QG_ROCMFPX;
+        const __m256 a = _mm256_add_ps(_mm256_add_ps(ggml_rocmfpx_dot16_s8_f32(qg +  0, yg +  0), ggml_rocmfpx_dot16_s8_f32(qg + 16, yg + 16)),
+                                       _mm256_add_ps(ggml_rocmfpx_dot16_s8_f32(qg + 32, yg + 32), ggml_rocmfpx_dot16_s8_f32(qg + 48, yg + 48)));
+        acc = _mm256_fmadd_ps(a, _mm256_set1_ps(ggml_table_f32_rocmfpx_ue4m3[e[g]]), acc);
+    }
+    return ggml_rocmfpx_hsum_f32_8(acc);
+#else
+    float sumf = 0.0f;
+    for (int g = 0; g < QK_ROCMFPL/QG_ROCMFPX; ++g) {
+        float sg = 0.0f;
+        for (int j = 0; j < QG_ROCMFPX; ++j) {
+            sg += (float) q[g*QG_ROCMFPX + j] * y[g*QG_ROCMFPX + j];
+        }
+        sumf += ggml_table_f32_rocmfpx_ue4m3[e[g]] * sg;
+    }
+    return sumf;
+#endif
+}
+
+static inline void ggml_rocmfpl_unpack(const uint8_t * GGML_RESTRICT qs, int8_t * GGML_RESTRICT q) {
+    for (int j = 0; j < QK_ROCMFPL/4; ++j) {
+        memcpy(q + 4*j, ggml_table_i8x4_rocmfpl[qs[j]], 4);
+    }
+}
+
+static inline int8_t ggml_rocmfpt_trit(uint8_t v, uint8_t pow3) {
+    return (int8_t) ((((uint16_t) (uint8_t) (v * pow3)) * 3 >> 8) - 1);
+}
+
+// TQ1_0 order: plane n of qs[0..31] is weights 32n.., of qs[32..47] is 160 + 16n.., of qh is 240 + 4n..
+static inline void ggml_rocmfpt_unpack(const block_rocmfpt * GGML_RESTRICT x, int8_t * GGML_RESTRICT q) {
+    static const uint8_t pow3[5] = { 1, 3, 9, 27, 81 };
+    for (int n = 0; n < 5; ++n) {
+        for (int m = 0; m < 32; ++m) {
+            q[32*n + m] = ggml_rocmfpt_trit(x->qs[m], pow3[n]);
+        }
+        for (int m = 0; m < 16; ++m) {
+            q[160 + 16*n + m] = ggml_rocmfpt_trit(x->qs[32 + m], pow3[n]);
+        }
+    }
+    for (int n = 0; n < 4; ++n) {
+        for (int j = 0; j < 4; ++j) {
+            q[240 + 4*n + j] = ggml_rocmfpt_trit(x->qh[j], pow3[n]);
+        }
+    }
+}
+
+static void ggml_vec_dot_rocmfpl_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMFPL == 0);
+
+    const block_rocmfpl * GGML_RESTRICT x = (const block_rocmfpl *) vx;
+    const float         * GGML_RESTRICT y = (const float *) vy;
+    int8_t q[QK_ROCMFPL];
+    float sumf = 0.0f;
+    for (int ib = 0; ib < n / QK_ROCMFPL; ++ib) {
+        ggml_rocmfpl_unpack(x[ib].qs, q);
+        sumf += ggml_rocmfpx_dot256_g64_f32(q, x[ib].e, y + ib*QK_ROCMFPL);
+    }
+    *s = sumf;
+}
+
+static void ggml_vec_dot_rocmfpt_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMFPT == 0);
+
+    const block_rocmfpt * GGML_RESTRICT x = (const block_rocmfpt *) vx;
+    const float         * GGML_RESTRICT y = (const float *) vy;
+    int8_t q[QK_ROCMFPT];
+    float sumf = 0.0f;
+    for (int ib = 0; ib < n / QK_ROCMFPT; ++ib) {
+        ggml_rocmfpt_unpack(&x[ib], q);
+        sumf += ggml_rocmfpx_dot256_g64_f32(q, x[ib].e, y + ib*QK_ROCMFPT);
+    }
+    *s = sumf;
+}
+
+// ROCmIQ2_XXS / ROCmIQ1_S: the block is decoded to int8 codes plus four float sub scales (one per 64 weights)
+
+static inline float ggml_rocmiq_dot256_f32(const int8_t * GGML_RESTRICT q, const float * GGML_RESTRICT sc, const float * GGML_RESTRICT y) {
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    for (int g = 0; g < 4; ++g) {
+        const int8_t * qg = q + 64*g;
+        const float  * yg = y + 64*g;
+        const float32x4_t a = vaddq_f32(vaddq_f32(ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg +  0), yg +  0), ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 16), yg + 16)),
+                                        vaddq_f32(ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 32), yg + 32), ggml_rocmfpx_dot16_s8_f32(vld1q_s8(qg + 48), yg + 48)));
+        acc = vfmaq_n_f32(acc, a, sc[g]);
+    }
+    return vaddvq_f32(acc);
+#elif defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+    __m256 acc = _mm256_setzero_ps();
+    for (int g = 0; g < 4; ++g) {
+        const int8_t * qg = q + 64*g;
+        const float  * yg = y + 64*g;
+        const __m256 a = _mm256_add_ps(_mm256_add_ps(ggml_rocmfpx_dot16_s8_f32(qg +  0, yg +  0), ggml_rocmfpx_dot16_s8_f32(qg + 16, yg + 16)),
+                                       _mm256_add_ps(ggml_rocmfpx_dot16_s8_f32(qg + 32, yg + 32), ggml_rocmfpx_dot16_s8_f32(qg + 48, yg + 48)));
+        acc = _mm256_fmadd_ps(a, _mm256_set1_ps(sc[g]), acc);
+    }
+    return ggml_rocmfpx_hsum_f32_8(acc);
+#else
+    float sumf = 0.0f;
+    for (int g = 0; g < 4; ++g) {
+        float sg = 0.0f;
+        for (int j = 0; j < 64; ++j) {
+            sg += (float) q[64*g + j] * y[64*g + j];
+        }
+        sumf += sc[g] * sg;
+    }
+    return sumf;
+#endif
+}
+
+static void ggml_vec_dot_rocmiq2_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMIQ == 0);
+
+    const block_rocmiq2 * GGML_RESTRICT x = (const block_rocmiq2 *) vx;
+    const float         * GGML_RESTRICT y = (const float *) vy;
+    int8_t q[QK_ROCMIQ];
+    float sc[4];
+    float sumf = 0.0f;
+    for (int ib = 0; ib < n / QK_ROCMIQ; ++ib) {
+        rocmfpx_rocmiq2_unpack(&x[ib], q, sc);
+        sumf += ggml_rocmiq_dot256_f32(q, sc, y + ib*QK_ROCMIQ);
+    }
+    *s = sumf;
+}
+
+static void ggml_vec_dot_rocmiq1_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    assert(nrc == 1);
+    GGML_UNUSED(nrc);
+    assert(n % QK_ROCMIQ == 0);
+
+    const block_rocmiq1 * GGML_RESTRICT x = (const block_rocmiq1 *) vx;
+    const float         * GGML_RESTRICT y = (const float *) vy;
+    int8_t q[QK_ROCMIQ];
+    float sc[4];
+    float sumf = 0.0f;
+    for (int ib = 0; ib < n / QK_ROCMIQ; ++ib) {
+        rocmfpx_rocmiq1_unpack(&x[ib], q, sc);
+        sumf += ggml_rocmiq_dot256_f32(q, sc, y + ib*QK_ROCMIQ);
+    }
+    *s = sumf;
+}
+
 // same values as rocmfp4_codebook in rocmfp4.c (Codebook10): low nibble = weight j, high nibble = weight j + 16
 static const int8_t ggml_rocmfp4_codebook_cpu[16] = {
      0,  1,  2,  3,  4,  6,  8, 10,
@@ -664,6 +845,30 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = rocmfpx_quantize_row_fp2,
         .vec_dot                  = ggml_vec_dot_rocmfpx_fp2_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q2_0_ROCMFPL] = {
+        .from_float               = rocmfpx_quantize_row_fpl,
+        .vec_dot                  = ggml_vec_dot_rocmfpl_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_Q1_0_ROCMFPT] = {
+        .from_float               = rocmfpx_quantize_row_fpt,
+        .vec_dot                  = ggml_vec_dot_rocmfpt_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_ROCMIQ2_XXS] = {
+        .from_float               = rocmfpx_quantize_row_rocmiq2,
+        .vec_dot                  = ggml_vec_dot_rocmiq2_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_ROCMIQ1_S] = {
+        .from_float               = rocmfpx_quantize_row_rocmiq1,
+        .vec_dot                  = ggml_vec_dot_rocmiq1_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
     [GGML_TYPE_Q6_0_ROCMFPX] = {
@@ -4353,6 +4558,11 @@ void ggml_cpu_init(void) {
             }
             for (int i = 0; i < (1 << 6); ++i) {
                 ggml_table_i8_rocmfpx_fp6[i] = (int8_t) ggml_rocmfpx_decode_fp6_cpu((uint32_t) i);
+            }
+            for (int i = 0; i < (1 << 8); ++i) {
+                for (int l = 0; l < 4; ++l) {
+                    ggml_table_i8x4_rocmfpl[i][l] = (int8_t) ggml_rocmfpx_decode_fp2_cpu((uint8_t) ((i >> (2*l)) & 3));
+                }
             }
 
             const uint64_t t_end = ggml_time_us(); UNUSED(t_end);

@@ -634,3 +634,61 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     return sum;
 }
 #endif
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+// one q8_1 block = 32 weights = 4 code words of chunk c (sub group c/2).
+// Signed grid bytes via two's complement per byte ((g ^ m) + (m & 1)), then +/-4 shift per byte:
+// |g| <= 43, so no byte carries or borrows into its neighbour.
+uint rocmiq2_sign_mask(uint s4) {
+    return (((s4 * 0x00204081u) & 0x01010101u) * 0xFFu);
+}
+
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    const uint ib = ib_a / 8;
+    const uint c = ib_a % 8;
+    const float d = rocmiq_sub_scale(uint(data_a[ib].sc), c >> 1) * 0.125;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint w = 0; w < 4; ++w) {
+        const uint code = uint(data_a[ib].qs[4 * c + w]);
+        const uvec2 g = iq2xxs_grid[code & 0xFFu];
+        const uint s7 = (code >> 8u) & 0x7Fu;
+        const uint sg = s7 | ((uint(bitCount(s7)) & 1u) << 7u);
+        const uint m0 = rocmiq2_sign_mask(sg & 15u);
+        const uint m1 = rocmiq2_sign_mask(sg >> 4u);
+        uint v0 = (g.x ^ m0) + (m0 & 0x01010101u);
+        uint v1 = (g.y ^ m1) + (m1 & 0x01010101u);
+        if ((code & 0x8000u) != 0u) {
+            v0 -= 0x04040404u;
+            v1 -= 0x04040404u;
+        } else {
+            v0 += 0x04040404u;
+            v1 += 0x04040404u;
+        }
+        q_sum += dotPacked4x8EXT(int32_t(v0), cache_b_qs[2 * w]);
+        q_sum += dotPacked4x8EXT(int32_t(v1), cache_b_qs[2 * w + 1]);
+    }
+
+    return FLOAT_TYPE(float(cache_b_ds.x) * d * float(q_sum));
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+// one q8_1 block = 32 weights = indices 8c .. 8c+7 (sub group c/2); each index is one packed int8x4 codebook word
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    const uint ib = ib_a / 8;
+    const uint c = ib_a % 8;
+    const float d = rocmiq_sub_scale(uint(data_a_packed16[ib].sc), c >> 1) * 0.03125;
+
+    const uint lo = uint(data_a_packed16[ib].ql[2 * c]) | (uint(data_a_packed16[ib].ql[2 * c + 1]) << 16u);
+    const uint hi = uint(data_a_packed16[ib].qh[c]);
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint k = 0; k < 8; ++k) {
+        const uint ci = bitfieldExtract(lo, 4 * int(k), 4) | (bitfieldExtract(hi, 2 * int(k), 2) << 4u);
+        q_sum += dotPacked4x8EXT(int32_t(rocmiq1_cb[ci]), cache_b_qs[k]);
+    }
+
+    return FLOAT_TYPE(float(cache_b_ds.x) * d * float(q_sum));
+}
+#endif

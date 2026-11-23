@@ -1,0 +1,82 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+// trit of a base-3 byte for multiplier m = 3^n, as -1..1
+FLOAT_TYPE fpt_t(const uint v, const uint m) {
+    return FLOAT_TYPE(int(((((v * m) & 255u) * 3u) >> 8)) - 1);
+}
+
+// 16 lanes per block: lane l owns qs bytes l, l+16, 32+l (5 trits each) and, for l < 4, qh byte l (4 trits).
+// B values of a block are loaded once and reused for every row.
+void compute_outputs(const uint first_row, const uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+
+    const uint nb = p.ncols / QUANT_K;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint l = tid % 16u;
+    const uint bstep = gl_WorkGroupSize.x / 16u;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint i = 0; i < NUM_ROWS; ++i) {
+            temp[j][i] = FLOAT_TYPE(0);
+        }
+    }
+
+    [[unroll]] for (uint jcol = 0; jcol < NUM_COLS; ++jcol) {
+        const uint b_base = jcol * p.batch_stride_b + b_offset;
+        for (uint i = tid / 16u; i < nb; i += bstep) {
+            const uint bi = b_base + i * QUANT_K;
+            FLOAT_TYPE b0[5], b1[5], b2[5], b3[4];
+            [[unroll]] for (uint t = 0; t < 5; ++t) {
+                b0[t] = FLOAT_TYPE(data_b[bi + 32u * t + l]);
+                b1[t] = FLOAT_TYPE(data_b[bi + 32u * t + l + 16u]);
+                b2[t] = FLOAT_TYPE(data_b[bi + 160u + 16u * t + l]);
+            }
+            [[unroll]] for (uint t = 0; t < 4; ++t) {
+                b3[t] = l < 4u ? FLOAT_TYPE(data_b[bi + 240u + 4u * t + l]) : FLOAT_TYPE(0);
+            }
+
+            for (uint nrow = 0; nrow < num_rows; ++nrow) {
+                const uint ib = a_offset + (first_row + nrow) * nb + i;
+                const uint v0 = uint(data_a[ib].qs[l]);
+                const uint v1 = uint(data_a[ib].qs[l + 16u]);
+                const uint v2 = uint(data_a[ib].qs[32u + l]);
+                const uint v3 = uint(data_a[ib].qh[l & 3u]);
+
+                // weight groups of 64: plane t of bytes 0..31 is 32t.., of bytes 32..47 is 160+16t.., of qh is 240+4t..
+                const FLOAT_TYPE s0 = fpt_t(v0, 1u) * b0[0] + fpt_t(v0, 3u) * b0[1] + fpt_t(v1, 1u) * b1[0] + fpt_t(v1, 3u) * b1[1];
+                const FLOAT_TYPE s1 = fpt_t(v0, 9u) * b0[2] + fpt_t(v0, 27u) * b0[3] + fpt_t(v1, 9u) * b1[2] + fpt_t(v1, 27u) * b1[3];
+                const FLOAT_TYPE s2 = fpt_t(v0, 81u) * b0[4] + fpt_t(v1, 81u) * b1[4] + fpt_t(v2, 1u) * b2[0] + fpt_t(v2, 3u) * b2[1];
+                const FLOAT_TYPE s3 = fpt_t(v2, 9u) * b2[2] + fpt_t(v2, 27u) * b2[3] + fpt_t(v2, 81u) * b2[4]
+                                    + fpt_t(v3, 1u) * b3[0] + fpt_t(v3, 3u) * b3[1] + fpt_t(v3, 9u) * b3[2] + fpt_t(v3, 27u) * b3[3];
+
+                temp[jcol][nrow] += FLOAT_TYPE(ue4m3_to_fp32(data_a[ib].e[0])) * s0 + FLOAT_TYPE(ue4m3_to_fp32(data_a[ib].e[1])) * s1
+                                  + FLOAT_TYPE(ue4m3_to_fp32(data_a[ib].e[2])) * s2 + FLOAT_TYPE(ue4m3_to_fp32(data_a[ib].e[3])) * s3;
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    init_iq_shmem(gl_WorkGroupSize);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, min(NUM_ROWS, p.stride_d - first_row));
+    }
+}

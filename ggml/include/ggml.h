@@ -441,7 +441,12 @@ extern "C" {
         // GGML_TYPE_TURBO4_0       = 106, // reserved: TurboQuant 4-bit KV cache in ROCmFPX, not ported
         GGML_TYPE_Q2_0_ROCMFPX      = 107, // ROCmFPx experimental 2-bit S40 codebook + dual UE4M3 scales
         GGML_TYPE_Q4_0_ROCMI4       = 108, // native signed-nibble 4-bit + UE4M3 scale (no codebook)
-        GGML_TYPE_COUNT   = 109,
+        // fork-private ids, kept away from the upstream ROCmFPX range
+        GGML_TYPE_Q2_0_ROCMFPL      = 120, // ROCmFP2-L: S40 codes, 256-weight blocks, UE4M3 scale per 64 (2.125 bpw)
+        GGML_TYPE_Q1_0_ROCMFPT      = 121, // ROCmFP-T: ternary codes, 256-weight blocks, UE4M3 scale per 64 (1.75 bpw)
+        GGML_TYPE_ROCMIQ2_XXS       = 122, // ROCmIQ2_XXS: iq2xxs grid + shift bit, 16-bit scale word per 256 (2.0625 bpw)
+        GGML_TYPE_ROCMIQ1_S         = 123, // ROCmIQ1_S: 64 x 4 int8 codebook, 16-bit scale word per 256 (1.5625 bpw)
+        GGML_TYPE_COUNT   = 124,
     };
 
     // [TAG_GGML_PREC]
@@ -509,6 +514,10 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q3_0_ROCMFPX          = 112, // ROCmFPx experimental 3-bit reference layout
         GGML_FTYPE_MOSTLY_Q2_0_ROCMFPX          = 113, // ROCmFPx experimental 2-bit S40 codebook layout
         GGML_FTYPE_MOSTLY_Q4_0_ROCMI4           = 118, // native signed 4-bit integer path
+        GGML_FTYPE_MOSTLY_Q2_0_ROCMFPL          = 120, // ROCmFP2-L 2.125 bpw
+        GGML_FTYPE_MOSTLY_Q1_0_ROCMFPT          = 121, // ROCmFP-T 1.75 bpw
+        GGML_FTYPE_MOSTLY_ROCMIQ2_XXS           = 122, // ROCmIQ2_XXS 2.0625 bpw
+        GGML_FTYPE_MOSTLY_ROCMIQ1_S             = 123, // ROCmIQ1_S 1.5625 bpw
     };
 
     // available tensor operations:

@@ -1,0 +1,71 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+// 16 lanes per block: lane l reads code word l = weights 16l .. 16l+15 (group l/4) with one 32-bit load.
+// B values of a block are loaded once and reused for every row.
+void compute_outputs(const uint first_row, const uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+
+    const uint nb = p.ncols / QUANT_K;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint l = tid % 16u;
+    const uint g = l >> 2;
+    const uint bstep = gl_WorkGroupSize.x / 16u;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint i = 0; i < NUM_ROWS; ++i) {
+            temp[j][i] = FLOAT_TYPE(0);
+        }
+    }
+
+    [[unroll]] for (uint jcol = 0; jcol < NUM_COLS; ++jcol) {
+        const uint b_base = jcol * p.batch_stride_b + b_offset;
+        for (uint i = tid / 16u; i < nb; i += bstep) {
+            const uint bi = b_base + i * QUANT_K + 16u * l;
+            vec4 b[4];
+            [[unroll]] for (uint k = 0; k < 4; ++k) {
+                b[k] = vec4(data_b[bi + 4u * k + 0u], data_b[bi + 4u * k + 1u], data_b[bi + 4u * k + 2u], data_b[bi + 4u * k + 3u]);
+            }
+
+            for (uint nrow = 0; nrow < num_rows; ++nrow) {
+                const uint ib = a_offset + (first_row + nrow) * nb + i;
+                const uint c = data_a_packed32[ib].qs[l];
+                const float d = ue4m3_to_fp32(uint8_t((data_a_packed32[ib].e >> (8u * g)) & 0xFFu));
+                float acc = 0.0;
+                [[unroll]] for (uint k = 0; k < 4; ++k) {
+                    const uint ck = c >> (8u * k);
+                    const vec4 q = vec4(kvalues_rocmfpx_fp2_const[ ck        & 3u],
+                                        kvalues_rocmfpx_fp2_const[(ck >> 2u) & 3u],
+                                        kvalues_rocmfpx_fp2_const[(ck >> 4u) & 3u],
+                                        kvalues_rocmfpx_fp2_const[(ck >> 6u) & 3u]);
+                    acc += dot(q, b[k]);
+                }
+                temp[jcol][nrow] += FLOAT_TYPE(d * acc);
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    init_iq_shmem(gl_WorkGroupSize);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, min(NUM_ROWS, p.stride_d - first_row));
+    }
+}
