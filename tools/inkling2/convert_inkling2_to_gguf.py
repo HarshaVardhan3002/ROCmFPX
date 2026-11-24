@@ -99,6 +99,16 @@ def nvfp4_pack(w: torch.Tensor, s: torch.Tensor) -> np.ndarray:
     return raw.reshape(rows, n_super * 36)
 
 
+E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
+
+
+def nvfp4_dequant(w: torch.Tensor, s: torch.Tensor, factor: float) -> torch.Tensor:
+    """ModelOpt NVFP4 rows (even element in the low nibble, E4M3 scale per 16) -> F32, times the expert factor."""
+    codes = w.to(torch.uint8).long()
+    vals = torch.stack([E2M1[codes & 0xF], E2M1[codes >> 4]], dim=-1).reshape(w.shape[0], -1, 16)
+    return (vals * s.float().unsqueeze(-1) * factor).reshape(w.shape[0], -1)
+
+
 def mxfp8_dequant(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     """E4M3 [.., n] with UE8M0 per 32 -> F32."""
     x = w.float()
@@ -177,6 +187,21 @@ def load_config(model_dir: Path) -> dict:
         eos=c.get("eos_token_id", t.get("eos_token_id")),
         n_shared=g("n_shared_experts", default=0),
     )
+    # Inkling 2 Mini: physical layers [loop_start, loop_end) run loop_count times, each visit gets a cache slot
+    lc = t.get("loop_config") or {}
+    cfg["loop_start"] = lc.get("core_start", 0)
+    cfg["loop_end"] = lc.get("core_end", 0)
+    cfg["loop_count"] = lc.get("num_passes", 1) if lc else 1
+    if lc.get("is_varloop", False):
+        raise ValueError("variable loops are not supported")
+    span = cfg["loop_end"] - cfg["loop_start"]
+    extra = span * (cfg["loop_count"] - 1)
+    # slot of the first visit of a physical layer, and the physical layer of each slot
+    cfg["first_slot"] = [i if i < cfg["loop_end"] else i + extra for i in range(n_layer)]
+    slot_phys = list(range(cfg["loop_end"])) + [cfg["loop_start"] + j % span for j in range(extra)] \
+        + list(range(cfg["loop_end"], n_layer))
+    cfg["n_slot"] = len(slot_phys)
+    cfg["slot_is_swa"] = [is_swa[p] for p in slot_phys]
     if cfg["n_shared"]:
         raise ValueError("shared experts are not supported")
     if g("scoring_func", default="sigmoid") != "sigmoid":
@@ -199,19 +224,61 @@ class Item:
         return n // bs * ts
 
 
+class Plan(list):
+    lora_used: set
+
+
 def src_qtype(dtype: str) -> QT:
     return {"F32": QT.F32, "BF16": QT.BF16, "F16": QT.F16}[dtype]
 
 
-def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
+def load_lora(path: Path, scale: float) -> tuple[dict, float]:
+    """llama.cpp LoRA adapter GGUF -> {base tensor name: (a, b)} in numpy order, and the merge scale.
+    a: [.., r, n_in] (token_embd: [V, r]), b: [.., n_out, r]; merged W = W + scale * b @ a (token_embd: a @ b.T)."""
+    r = gguf.GGUFReader(path)
+    assert bytes(r.fields["general.type"].parts[-1]).decode() == "adapter"
+    alpha = float(r.fields["adapter.lora_alpha"].parts[-1][0])
+    t = {x.name: np.array(x.data, dtype=np.float32) for x in r.tensors}
+    pairs = {}
+    for n in t:
+        if n.endswith(".lora_a"):
+            base = n[:-len(".lora_a")]
+            pairs[base] = (t[n], t[base + ".lora_b"])
+    a0, _ = next(iter(pairs.values()))
+    rank = a0.shape[-1] if next(iter(pairs)).startswith("token_embd") else a0.shape[-2]
+    eff = scale * (alpha / rank if alpha else 1.0)
+    logger.info(f"LoRA {path.name}: {len(pairs)} tensors, alpha {alpha}, rank {rank}, merge scale {eff}")
+    return pairs, eff
+
+
+def build_plan(src: Source, cfg: dict, mxfp8_mode: str, nvfp4_mode: str = "native", all_f32: bool = False,
+               lora: dict | None = None, lora_scale: float = 1.0) -> list[Item]:
     P = "model.llm."
-    plan: list[Item] = []
+    plan: Plan = Plan()
     V = cfg["vocab"]
     K = cfg["conv_k"]
+    # LoRA names use physical layers (blk.i); our tensors live under the slot of the first visit
+    lora_map = {}
+    for n, ab in (lora or {}).items():
+        if n.startswith("blk."):
+            i, rest = n[4:].split(".", 1)
+            n = f"blk.{cfg['first_slot'][int(i)]}.{rest}"
+        lora_map[n] = ab
+    lora_used = set()
+
+    def lora_delta(gname: str) -> np.ndarray | None:
+        if gname not in lora_map:
+            return None
+        lora_used.add(gname)
+        a, b = lora_map[gname]
+        if gname.startswith("token_embd"):
+            return lora_scale * (a @ b.T)
+        return lora_scale * np.matmul(b, a)
 
     def plain(gname, sname, f32=False, transform=None, shape=None):
         dt, sh = src.meta(sname)
-        qt = QT.F32 if f32 else src_qtype(dt)
+        has_lora = gname in lora_map
+        qt = QT.F32 if f32 or all_f32 or has_lora else src_qtype(dt)
         shp = shape if shape is not None else sh
 
         def produce():
@@ -219,7 +286,15 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
             if transform is not None:
                 t = transform(t)
             if qt == QT.F32:
-                return t.float().contiguous().numpy()
+                x = t.float().contiguous().numpy()
+                d = lora_delta(gname)
+                if d is not None:
+                    if gname.startswith("token_embd") and d.shape[0] > x.shape[0]:
+                        # adapters made on the padded upstream embedding: token ids match, padding rows are unused
+                        d = d[:x.shape[0]]
+                    assert d.shape == x.shape, (gname, d.shape, x.shape)
+                    x = x + d.astype(np.float32)
+                return x
             return to_np(t)[0]
         plan.append(Item(gname, list(shp), qt, produce))
 
@@ -230,7 +305,7 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
 
     cache: dict = {}
 
-    def expert_parts(il: int, which: str):
+    def expert_parts(il: int, which: str, force_f32: bool = False):
         # returns a callable per part ('gate', 'up', 'down') and its (shape, qtype)
         base = f"{P}layers.{il}.mlp.experts."
         sname = base + ("w13_weight" if which in ("gate", "up") else "w2_weight")
@@ -248,7 +323,7 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
         if dt in ("F32", "BF16", "F16"):
             rows = sh[1] // 2 if which != "down" else sh[1]
             shape = [E, rows, sh[2]]
-            qt = src_qtype(dt)
+            qt = QT.F32 if force_f32 else src_qtype(dt)
 
             def produce():
                 t = load(sname)[:, sel]
@@ -257,6 +332,22 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
 
         scale_name = sname + "_scale"
         amax_name = sname + "_amax"
+        if src.has(amax_name) and (nvfp4_mode == "f32" or force_f32):
+            # NVFP4 dequantized (test models narrower than one ggml NVFP4 block)
+            rows = sh[1] // 2 if which != "down" else sh[1]
+            ncols = sh[2] * 2
+            shape = [E, rows, ncols]
+
+            def produce():
+                w = load(sname)[:, sel]
+                s = src.get(scale_name)[:, sel]
+                f = (src.get(amax_name).float().reshape(-1) / src.get(sname + "_outer_scale_denominator").float().reshape(-1))
+                out = np.empty((E, rows, ncols), dtype=np.float32)
+                for e in range(E):
+                    out[e] = nvfp4_dequant(w[e].contiguous(), s[e].contiguous(), float(f[e])).numpy()
+                return out
+            return shape, QT.F32, produce, None
+
         if src.has(amax_name):
             # NVFP4
             rows = sh[1] // 2 if which != "down" else sh[1]
@@ -282,7 +373,7 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
         rows = sh[1] // 2 if which != "down" else sh[1]
         ncols = sh[2]
         shape = [E, rows, ncols]
-        if mxfp8_mode == "q8_0":
+        if mxfp8_mode == "q8_0" and not force_f32:
             def produce():
                 w = load(sname)[:, sel]
                 s = src.get(scale_name)[:, sel]
@@ -291,6 +382,12 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
                     out[e] = q8_0(mxfp8_dequant(w[e], s[e]))
                 return out
             return shape, QT.Q8_0, produce, None
+        if mxfp8_mode == "f32" or all_f32 or force_f32:
+            def produce():
+                w = load(sname)[:, sel]
+                s = src.get(scale_name)[:, sel]
+                return np.stack([mxfp8_dequant(w[e], s[e]).numpy() for e in range(E)]).astype(np.float32)
+            return shape, QT.F32, produce, None
 
         def produce():
             w = load(sname)[:, sel]
@@ -301,10 +398,35 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
             return out
         return shape, QT.BF16, produce, None
 
+    looped = cfg["loop_count"] > 1
+    if looped:
+        # [q, mlp] and [k, v] per loop layer -> [n_loop, 4, n_embd] in q, k, v, mlp order
+        n_loop = cfg["loop_end"] - cfg["loop_start"]
+
+        def produce_msg_q():
+            q = src.get(P + "middle_cycle_cross_pass_queries").float().reshape(n_loop, 2, -1)
+            kv = src.get(P + "middle_cycle_cross_pass_kv_queries").float().reshape(n_loop, 2, -1)
+            return torch.cat([q[:, :1], kv, q[:, 1:]], dim=1).contiguous().numpy()
+        plan.append(Item("loop_msg_q.weight", [n_loop, 4, cfg["n_embd"]], QT.F32, produce_msg_q))
+
     for il in range(cfg["n_layer"]):
         L = f"{P}layers.{il}."
-        B = f"blk.{il}."
+        B = f"blk.{cfg['first_slot'][il]}."
         swa = cfg["is_swa"][il]
+
+        if looped and cfg["loop_start"] <= il < cfg["loop_end"]:
+            # message gates stacked in q (controllers.attn), k, v, mlp order
+            ctl = [f"{L}controllers.{c}." for c in ("attn", "k", "v", "mlp")]
+            for gname, sname, f32 in (("loop_gate_down", "down_weight", False),
+                                      ("loop_gate_forget", "forget_weight", True),
+                                      ("loop_gate_msg", "gain_weight", True)):
+                dt, sh = src.meta(ctl[0] + sname)
+                qt = QT.F32 if f32 or all_f32 else src_qtype(dt)
+
+                def produce(names=[c + sname for c in ctl], qt=qt):
+                    t = torch.stack([src.get(n) for n in names], dim=0)
+                    return t.float().contiguous().numpy() if qt == QT.F32 else to_np(t)[0]
+                plan.append(Item(B + gname + ".weight", [4, *sh], qt, produce))
 
         if il > 0:
             plain(B + "attn_res_q.weight", f"{P}attn_res.attn_queries.{il - 1}", f32=True)
@@ -354,12 +476,25 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str) -> list[Item]:
         plain(B + "exp_probs_b.bias", L + "mlp.gate.bias", f32=True)
 
         for part, gname in (("gate", "ffn_gate_exps"), ("up", "ffn_up_exps"), ("down", "ffn_down_exps")):
-            shape, qt, produce, produce_scale = expert_parts(il, part)
-            plan.append(Item(B + gname + ".weight", shape, qt, produce))
+            lname = B + gname + ".weight"
+            shape, qt, produce, produce_scale = expert_parts(il, part, force_f32=lname in lora_map)
+            if lname in lora_map:
+                assert qt == QT.F32 and produce_scale is None
+
+                def produce(base=produce, lname=lname):
+                    x = base()
+                    d = lora_delta(lname)
+                    assert d.shape == x.shape, (lname, d.shape, x.shape)
+                    x += d.astype(np.float32)
+                    return x
+            plan.append(Item(lname, shape, qt, produce))
             if produce_scale is not None:
                 plan.append(Item(B + gname + ".scale", [shape[0]], QT.F32, produce_scale))
 
     plain("output.weight", P + "unembed.weight", transform=lambda t: t[:V], shape=[V, cfg["n_embd"]])
+    missing = set(lora_map) - {it.name for it in plan}
+    assert not missing, f"LoRA tensors with no target: {sorted(missing)[:5]}"
+    plan.lora_used = lora_used  # filled while producing; checked after writing
     return plan
 
 
@@ -411,15 +546,20 @@ def main():
     ap.add_argument("model_dir", type=Path)
     ap.add_argument("outfile", type=Path)
     ap.add_argument("--tokenizer-dir", type=Path, default=None)
-    ap.add_argument("--mxfp8", choices=["q8_0", "bf16"], default="q8_0")
+    ap.add_argument("--mxfp8", choices=["q8_0", "bf16", "f32"], default="q8_0")
+    ap.add_argument("--nvfp4", choices=["native", "f32"], default="native")
+    ap.add_argument("--all-f32", action="store_true", help="store every plain tensor as F32 (exact reference checks)")
     ap.add_argument("--name", default="Inkling-2-Small")
+    ap.add_argument("--lora", type=Path, default=None, help="llama.cpp LoRA adapter GGUF to merge (physical layer names)")
+    ap.add_argument("--lora-scale", type=float, default=1.0)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     cfg = load_config(args.model_dir)
     src = Source(args.model_dir)
-    plan = build_plan(src, cfg, args.mxfp8)
+    lora, lscale = load_lora(args.lora, args.lora_scale) if args.lora else (None, 1.0)
+    plan = build_plan(src, cfg, args.mxfp8, args.nvfp4, args.all_f32, lora, lscale)
     total = sum(it.nbytes() for it in plan)
     logger.info(f"{len(plan)} tensors, {total / 2**30:.2f} GiB")
     if args.dry_run:
@@ -430,7 +570,7 @@ def main():
     arch = "inkling2"
     w = gguf.GGUFWriter(args.outfile, arch)
     w.add_name(args.name)
-    w.add_block_count(cfg["n_layer"])
+    w.add_block_count(cfg["n_slot"])
     w.add_context_length(cfg["ctx"])
     w.add_embedding_length(cfg["n_embd"])
     w.add_feed_forward_length(cfg["n_ff_exp"])
@@ -440,7 +580,11 @@ def main():
     w.add_value_length(cfg["head_dim"])
     w.add_layer_norm_rms_eps(cfg["eps"])
     w.add_sliding_window(cfg["n_swa"])
-    w.add_sliding_window_pattern(cfg["is_swa"])
+    w.add_sliding_window_pattern(cfg["slot_is_swa"])
+    if cfg["loop_count"] > 1:
+        w.add_uint32(f"{arch}.loop.start", cfg["loop_start"])
+        w.add_uint32(f"{arch}.loop.end", cfg["loop_end"])
+        w.add_uint32(f"{arch}.loop.count", cfg["loop_count"])
     w.add_expert_count(cfg["n_expert"])
     w.add_expert_used_count(cfg["n_expert_used"])
     w.add_expert_feed_forward_length(cfg["n_ff_exp"])
@@ -494,6 +638,9 @@ def main():
         if i % 20 == 0 or it.nbytes() > 2**28:
             logger.info(f"[{i + 1}/{len(plan)}] {it.name} {it.qtype.name} {it.shape}  {done / 2**30:.1f} GiB")
     w.close()
+    if lora:
+        assert len(plan.lora_used) == len(lora), f"LoRA merged into {len(plan.lora_used)} of {len(lora)} tensors"
+        logger.info(f"LoRA merged into {len(plan.lora_used)} tensors")
     logger.info(f"wrote {args.outfile} ({done / 2**30:.2f} GiB)")
 
 

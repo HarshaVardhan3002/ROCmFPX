@@ -20,6 +20,12 @@
 // Every layer has both an attention cache and a short-conv state (hybrid iswa memory, filters all true).
 // The conv state row holds four convolutions: k | v | attention output | MoE output.
 //
+// Inkling 2 Mini (inkling2_loop) adds a looped core: physical layers [loop_start, loop_end) run loop_count
+// times. Every visit has its own cache slot (the GGUF block count is the slot count, see loop_physical), each
+// pass restarts from the prelude output and block states, and in the later passes the q, k, v and MoE inputs
+// get a message read from the previous pass (its core blocks and output) through learned queries, mixed in
+// as (1 - forget)*h + gain*msg with tanh gates of a low-rank projection of [norm(h), norm(msg)].
+//
 
 void llama_model_inkling2::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -57,10 +63,26 @@ void llama_model_inkling2::load_arch_hparams(llama_model_loader & ml) {
 
     std::fill(hparams.is_recr_impl.begin(), hparams.is_recr_impl.end(), true);
 
+    ml.get_key(LLM_KV_LOOP_START, hparams.loop_start, false);
+    ml.get_key(LLM_KV_LOOP_END,   hparams.loop_end,   false);
+    ml.get_key(LLM_KV_LOOP_COUNT, hparams.loop_count, false);
+    if (hparams.loop_count > 1) {
+        const uint32_t blk   = hparams.inkling_attn_res_block;
+        const uint32_t extra = (hparams.loop_end - hparams.loop_start) * (hparams.loop_count - 1);
+        GGML_ASSERT(hparams.n_layer_nextn == 0 && "inkling2: MTP layers are not supported with a loop");
+        GGML_ASSERT(hparams.loop_start > 0 && hparams.loop_start < hparams.loop_end);
+        GGML_ASSERT(hparams.loop_start % blk == 0 && hparams.loop_end % blk == 0);
+        GGML_ASSERT(hparams.n_layer() > extra && hparams.loop_end <= hparams.n_layer() - extra);
+        for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+            // a later visit runs the same layer kind as the first one
+            GGML_ASSERT(hparams.is_swa(il) == hparams.is_swa(hparams.loop_first_slot(hparams.loop_physical(il))));
+        }
+    }
+
     type = LLM_TYPE_UNKNOWN; // Inkling-2-Small: 48 layers, 594B total / 17B active
 }
 
-void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
+void llama_model_inkling2::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
     const int64_t n_ff_exp = hparams.n_ff_exp();
@@ -73,8 +95,26 @@ void llama_model_inkling2::load_arch_tensors(llama_model_loader &) {
     output        = create_tensor(tn(LLM_TENSOR_OUTPUT,          "weight"), {n_embd, n_vocab}, 0);
     output_res_q  = create_tensor(tn(LLM_TENSOR_OUTPUT_RES_Q,    "weight"), {n_embd}, 0);
 
+    const bool    looped = hparams.loop_count > 1;
+    const int64_t n_span = (int64_t) hparams.loop_end - hparams.loop_start;
+    if (looped) {
+        loop_msg_q = create_tensor(tn(LLM_TENSOR_LOOP_MSG_Q, "weight"), {n_embd, 4, n_span}, 0);
+    }
+
     for (int i = 0; i < n_layer; ++i) {
+        // looped models: a physical layer is stored in the slot of its first visit, the later visits are
+        // aliased in llama_model::load_tensors after the generic scale pass
+        if (hparams.loop_first_slot(hparams.loop_physical(i)) != (uint32_t) i) {
+            continue;
+        }
         auto & layer = layers[i];
+
+        if (looped && (uint32_t) i >= hparams.loop_start && (uint32_t) i < hparams.loop_end) {
+            const int64_t rank = ml.get_tensor_meta(tn(LLM_TENSOR_LOOP_GATE_DOWN, "weight", i).str().c_str())->ne[1];
+            layer.loop_gate_down   = create_tensor(tn(LLM_TENSOR_LOOP_GATE_DOWN,   "weight", i), {2*n_embd, rank, 4}, 0);
+            layer.loop_gate_forget = create_tensor(tn(LLM_TENSOR_LOOP_GATE_FORGET, "weight", i), {rank, n_embd, 4}, 0);
+            layer.loop_gate_msg    = create_tensor(tn(LLM_TENSOR_LOOP_GATE_MSG,    "weight", i), {rank, n_embd, 4}, 0);
+        }
 
         const bool    is_swa  = hparams.is_swa(i);
         const int64_t n_rel   = is_swa ? hparams.n_swa : hparams.inkling_rel_extent;
@@ -214,6 +254,19 @@ ggml_tensor * llama_model_inkling2::graph::l2_clip(ggml_tensor * x, ggml_tensor 
     return ggml_div(ctx0, x, n);
 }
 
+// message gate c (0..3 = q, k, v, ffn): (1 - tanh(F g))*h + tanh(M g)*msg with g = D [rms(h); rms(msg)]
+ggml_tensor * llama_model_inkling2::graph::loop_gate(ggml_tensor * h, ggml_tensor * msg, const llama_layer & layer, int c) {
+    auto slice = [&](ggml_tensor * w) {
+        return ggml_view_2d(ctx0, w, w->ne[0], w->ne[1], w->nb[1], (size_t) c*w->nb[2]);
+    };
+    const float eps = hparams.f_norm_rms_eps;
+    ggml_tensor * g = ggml_concat(ctx0, ggml_rms_norm(ctx0, h, eps), ggml_rms_norm(ctx0, msg, eps), 0); // [2*n_embd, T]
+    g = ggml_mul_mat(ctx0, slice(layer.loop_gate_down), g);                                          // [rank, T]
+    ggml_tensor * forget = ggml_tanh(ctx0, ggml_mul_mat(ctx0, slice(layer.loop_gate_forget), g));
+    ggml_tensor * gain   = ggml_tanh(ctx0, ggml_mul_mat(ctx0, slice(layer.loop_gate_msg),    g));
+    return ggml_add(ctx0, ggml_sub(ctx0, h, ggml_mul(ctx0, forget, h)), ggml_mul(ctx0, gain, msg));
+}
+
 // causal depthwise conv over [state | x], with the state row shared by the layer's four convs
 //   out = (conv(x) + x) / sqrt(K + 1)                         static
 //   out = (sum_lag x[t-lag] (w[lag] + dyn[t, lag]) + x) / sqrt(2K + 1)   dynamic (dyn_in != nullptr)
@@ -328,11 +381,45 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
 
     std::vector<ggml_tensor *> blocks;
 
+    // looped core: the prelude state every pass starts from, and the previous pass's blocks and output
+    const bool     looped   = hparams.loop_count > 1;
+    const uint32_t span     = hparams.loop_end - hparams.loop_start;
+    const uint32_t late_end = hparams.loop_end + span*(hparams.loop_count - 1);
+    ggml_tensor * prelude = nullptr;
+    std::vector<ggml_tensor *> prelude_blocks;
+    std::vector<ggml_tensor *> bank;
+    ggml_tensor * bank_out = nullptr;
+
     for (int il = 0; il < n_layer; ++il) {
         const auto & layer = model.layers[il];
 
+        const uint32_t ip    = hparams.loop_physical(il);
+        const bool     later = looped && (uint32_t) il >= hparams.loop_end && (uint32_t) il < late_end;
+        if (looped && (uint32_t) il == hparams.loop_start) {
+            prelude        = inpL;
+            prelude_blocks = blocks;
+        }
+        if (later && ((uint32_t) il - hparams.loop_end) % span == 0) {
+            // skip the block the previous pass pushed at its first core layer (the prelude output)
+            bank.assign(blocks.begin() + prelude_blocks.size() + 1, blocks.end());
+            bank_out = inpL;
+            inpL     = prelude;
+            blocks   = prelude_blocks;
+        }
+
+        // messages of this layer [n_embd, 4, n_tokens]: q, k, v, ffn
+        ggml_tensor * msgs = nullptr;
+        if (later) {
+            ggml_tensor * q = ggml_view_2d(ctx0, model.loop_msg_q, n_embd, 4, model.loop_msg_q->nb[1],
+                                           (size_t) (ip - hparams.loop_start)*model.loop_msg_q->nb[2]);
+            msgs = block_mix(bank, bank_out, q, il, "loop_msg_probs");
+        }
+        auto msg = [&](int c) {
+            return ggml_cont(ctx0, ggml_view_2d(ctx0, msgs, n_embd, n_tokens, msgs->nb[2], (size_t) c*msgs->nb[1]));
+        };
+
         const bool    is_swa   = hparams.is_swa(il);
-        const bool    boundary = (uint32_t) il % blk == 0;
+        const bool    boundary = ip % blk == 0;
         const int64_t hd       = hparams.n_embd_head_k(il);
         const int64_t nh       = hparams.n_head(il);
         const int64_t nh_kv    = hparams.n_head_kv(il);
@@ -349,7 +436,7 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         ggml_tensor * xq;
         ggml_tensor * xk;
         ggml_tensor * xv;
-        if (il == 0) {
+        if (ip == 0) {
             xq = xk = xv = partial;
         } else {
             ggml_tensor * mix = block_mix(blocks, partial, layer.attn_res_q, il, "attn_res_probs");
@@ -362,7 +449,18 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
             xv = n_q > 1 ? pick(2) : xq;
         }
 
-        if (is_swa) {
+        if (msgs) {
+            // the messages make the q, k and v inputs differ, also in the SWA layers
+            xk = loop_gate(xk, msg(1), layer, 1);
+            xv = loop_gate(xv, msg(2), layer, 2);
+            xq = loop_gate(xq, msg(0), layer, 0);
+        }
+
+        if (is_swa && msgs) {
+            xq = build_norm(xq, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+            xk = build_norm(xk, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+            xv = build_norm(xv, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
+        } else if (is_swa) {
             xq = build_norm(xq, layer.attn_norm, nullptr, LLM_NORM_RMS, il);
             xk = xv = xq;
         } else {
@@ -372,9 +470,9 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         }
         cb(xq, "attn_norm", il);
 
-        ggml_tensor * Qcur  = build_lora_mm(layer.wq, xq);
-        ggml_tensor * Kcur  = build_lora_mm(layer.wk, xk);
-        ggml_tensor * Vcur  = build_lora_mm(layer.wv, xv);
+        ggml_tensor * Qcur  = build_lora_mm(layer.wq, xq, layer.wq_s);
+        ggml_tensor * Kcur  = build_lora_mm(layer.wk, xk, layer.wk_s);
+        ggml_tensor * Vcur  = build_lora_mm(layer.wv, xv, layer.wv_s);
         ggml_tensor * Rcur  = build_lora_mm(layer.attn_rel, xq);
         ggml_tensor * gate  = build_lora_mm(layer.wqkv_gate, xq);
         ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, xq);      // [nh, n_tokens]
@@ -475,7 +573,7 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         cb(cur, "kqv_out", il);
 
         cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate));
-        cur = build_lora_mm(layer.wo, cur);
+        cur = build_lora_mm(layer.wo, cur, layer.wo_s);
         cb(cur, "attn_out", il);
 
         cur = short_conv(cur, conv_rs, conv_state, 2*kv_dim, layer.attn_post_conv, nullptr, 0, il);
@@ -493,6 +591,9 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         // MoE
         cur = block_mix(blocks, residual, layer.ffn_res_q, il, "ffn_res_probs");
         cur = ggml_reshape_2d(ctx0, cur, n_embd, n_tokens);
+        if (msgs) {
+            cur = loop_gate(cur, msg(3), layer, 3);
+        }
         cur = build_norm(cur, layer.ffn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
 
@@ -531,7 +632,7 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
 
     const float cap = hparams.f_final_logit_softcapping;
     cur = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/cap)), cap);

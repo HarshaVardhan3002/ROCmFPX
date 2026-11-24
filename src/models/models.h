@@ -3027,6 +3027,7 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * block_mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur,
                                 ggml_tensor * q, int il, const char * name);
         ggml_tensor * l2_clip(ggml_tensor * x, ggml_tensor * scale, float threshold);
+        ggml_tensor * loop_gate(ggml_tensor * h, ggml_tensor * msg, const llama_layer & layer, int c);
         ggml_tensor * short_conv(ggml_tensor * x, ggml_tensor * conv_rs, ggml_tensor * conv_state,
                                  int64_t ch_off, ggml_tensor * kernel,
                                  ggml_tensor * dyn_w, int64_t n_dyn_heads, int il);

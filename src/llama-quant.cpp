@@ -610,7 +610,8 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
         return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
     };
     const int n_expert = std::max(1, (int)qs.model.hparams.n_expert);
-    auto layer_info = [n_expert] (int i_layer, int n_layer, const char * name) {
+    const llama_hparams & hp_loop = qs.model.hparams;
+    auto layer_info = [n_expert, &hp_loop] (int i_layer, int n_layer, const char * name) {
         if (n_expert > 1) {
             // Believe it or not, "experts" in the FFN of Mixtral-8x7B are not consecutive, but occasionally randomly
             // sprinkled in the model. Hence, simply dividing i_ffn_down by n_expert does not work
@@ -618,6 +619,10 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             // tensor name.
             if (sscanf(name, "blk.%d.", &i_layer) != 1) {
                 throw std::runtime_error(format("Failed to determine layer for tensor %s", name));
+            }
+            // looped models name each layer by the slot of its first visit: count physical layers
+            if (hp_loop.loop_count > 1) {
+                i_layer = (int) hp_loop.loop_physical(i_layer);
             }
             if (i_layer < 0 || i_layer >= n_layer) {
                 throw std::runtime_error(format("Bad layer %d for tensor %s. Must be in [0, %d)", i_layer, name, n_layer));
