@@ -7790,6 +7790,53 @@ struct test_mul_mat_add : public test_case {
     }
 };
 
+// MUL_MAT followed by MUL with a one-element tensor (ROCmFPX per-tensor .scale), fused on some backends
+struct test_mul_mat_tensor_scale : public test_case {
+    const ggml_type type;
+    const int64_t m;
+    const int64_t n;
+    const int64_t k;
+    const bool with_add; // residual add after the scale (MUL_MAT + MUL + ADD)
+
+    std::string vars() override {
+        return VARS_TO_STR5(type, m, n, k, with_add);
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MUL_MAT_TENSOR_SCALE";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_mul_mat_tensor_scale(ggml_type type, int64_t m, int64_t n, int64_t k, bool with_add = false)
+        : type(type), m(m), n(n), k(k), with_add(with_add) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_2d(ctx, type, k, m);
+        ggml_set_name(a, "a");
+        ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, n);
+        ggml_set_name(b, "b");
+        ggml_tensor * s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+        ggml_set_name(s, "scale");
+        ggml_tensor * mm = ggml_mul_mat(ctx, a, b);
+        ggml_set_name(mm, "mm");
+        ggml_tensor * out = ggml_mul(ctx, mm, s);
+        ggml_set_name(out, "scaled");
+        if (with_add) {
+            ggml_tensor * r = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, m, n);
+            ggml_set_name(r, "residual");
+            out = ggml_add(ctx, out, r);
+            ggml_set_name(out, "out");
+        }
+        return out;
+    }
+};
+
 struct test_mul_mat_vec_fusion : public test_case {
     const ggml_type type;
     const ggml_glu_op glu_op;
@@ -12302,6 +12349,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(192, 128, 4, { 8, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_BF16, GGML_TYPE_BF16));
     test_cases.emplace_back(new test_flash_attn_ext(512, 512, 4, { 4, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_BF16, GGML_TYPE_BF16));
     test_cases.emplace_back(new test_flash_attn_ext(576, 512, 4, { 4, 1}, 512, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_BF16, GGML_TYPE_BF16, {0, 1, 2, 3}, true, true));
+
+    // MUL_MAT + one-element MUL (ROCmFPX tensor scale)
+    for (ggml_type type : { GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_IQ2_XXS, GGML_TYPE_Q8_0_ROCMFPX,
+                            GGML_TYPE_Q4_0_ROCMFP4, GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_ROCMIQ1_S, GGML_TYPE_F16 }) {
+        for (int64_t n : { 1, 2, 16 }) {
+            for (bool with_add : { false, true }) {
+                test_cases.emplace_back(new test_mul_mat_tensor_scale(type, 256, n, 1024, with_add));
+                test_cases.emplace_back(new test_mul_mat_tensor_scale(type, 4096, n, 4096, with_add));
+            }
+        }
+    }
 
     // FLASH_ATTN_EXT: large logits
     test_cases.emplace_back(new test_flash_attn_ext_large_logits( 64,  64, 16, {4, 1}, 1024, 75, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));

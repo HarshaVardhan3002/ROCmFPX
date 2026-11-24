@@ -117,6 +117,10 @@ void reduce_result(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t 
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
                     temp[j][n] += FLOAT_TYPE(data_fuse0[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
+                // fused MUL by a one-element tensor (ROCmFPX per-tensor .scale), before an optional fused ADD
+                if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0) != 0) {
+                    temp[j][n] *= FLOAT_TYPE(data_fuse0[0]);
+                }
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS1) != 0) {
                     temp[j][n] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
@@ -172,6 +176,10 @@ void reduce_result(FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t d_offs
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
                     temp[j][n] += FLOAT_TYPE(data_fuse0[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
+                // fused MUL by a one-element tensor (ROCmFPX per-tensor .scale), before an optional fused ADD
+                if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0) != 0) {
+                    temp[j][n] *= FLOAT_TYPE(data_fuse0[0]);
+                }
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS1) != 0) {
                     temp[j][n] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);
                 }
@@ -216,6 +224,10 @@ void reduce_result(FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const in uint32_t d_offs
 #else
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
                     tmpsh[j][n][0] += FLOAT_TYPE(data_fuse0[j*p.batch_stride_d + d_offset + first_row + n]);
+                }
+                // fused MUL by a one-element tensor (ROCmFPX per-tensor .scale), before an optional fused ADD
+                if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0) != 0) {
+                    tmpsh[j][n][0] *= FLOAT_TYPE(data_fuse0[0]);
                 }
                 if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS1) != 0) {
                     tmpsh[j][n][0] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + first_row + n]);

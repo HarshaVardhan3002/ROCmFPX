@@ -6907,9 +6907,10 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
         if (src0_type == GGML_TYPE_IQ1_S || src0_type == GGML_TYPE_IQ1_M || src0_type == GGML_TYPE_ROCMIQ1_S) {
             return true;
         }
-        // ROCmIQ2_XXS: the float kernel is faster on k = 512 expert rows, MMVQ from k = 1024 up
+        // ROCmIQ2_XXS: the float kernel is as fast or faster at every shape measured on the 8060S (k = 512 expert
+        // rows, dense k = 2560 / 4096 / 10240), and it skips the Q8_1 activation pass, so never use MMVQ
         if (src0_type == GGML_TYPE_ROCMIQ2_XXS) {
-            return k >= 1024;
+            return false;
         }
         if (k < 2048) {
             return false;
@@ -7155,7 +7156,12 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     uint32_t fusion_flags = 0;
 
     vk_subbuffer d_F0 = d_D;
-    if (ctx->num_additional_fused_ops > 0) {
+    if (ctx->num_additional_fused_ops > 0 && cgraph->nodes[node_idx + 1]->op == GGML_OP_MUL) {
+        // MUL_MAT + MUL by a one-element tensor (ROCmFPX tensor scale), see ggml_vk_can_fuse
+        const ggml_tensor * mul = cgraph->nodes[node_idx + 1];
+        d_F0 = ggml_vk_tensor_subbuffer(ctx, mul->src[0] == dst ? mul->src[1] : mul->src[0]);
+        fusion_flags |= MAT_VEC_FUSION_FLAGS_SCALE0;
+    } else if (ctx->num_additional_fused_ops > 0) {
         const ggml_tensor * add = cgraph->nodes[node_idx + 1];
         const ggml_tensor * bias = add->src[0] == dst ? add->src[1] : add->src[0];
 
@@ -13993,6 +13999,23 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
         }
     }
 
+    if ((ops.size() == 2 || ops.size() == 3) && ops.begin()[0] == GGML_OP_MUL_MAT && ops.begin()[1] == GGML_OP_MUL) {
+        // ROCmFPX tensor scale: dense quantized mat-vec times a one-element f32 tensor, optionally plus a residual
+        const ggml_tensor *mm = cgraph->nodes[node_idx];
+        const ggml_tensor *mul = cgraph->nodes[node_idx + 1];
+        const ggml_tensor *scale = mul->src[0] == mm ? mul->src[1] : mul->src[0];
+
+        if (ggml_nrows(mm) != 1 || !ggml_is_quantized(mm->src[0]->type) || !ggml_is_contiguous(mm->src[0]) ||
+            !ggml_is_contiguous(mm->src[1]) || mm->type != GGML_TYPE_F32 || mul->type != GGML_TYPE_F32 ||
+            scale->type != GGML_TYPE_F32 || ggml_nelements(scale) != 1 || !ggml_are_same_shape(mul, mm) ||
+            get_misalign_bytes(ctx, scale) != 0 || get_misalign_bytes(ctx, mul) != 0) {
+            return false;
+        }
+        if (ops.size() == 3 && (ops.begin()[2] != GGML_OP_ADD || !mm_add_ok(mul, cgraph->nodes[node_idx + 2]))) {
+            return false;
+        }
+    }
+
     auto const &mmid_mul_ok = [&](const ggml_tensor *mmid, const ggml_tensor *mul) {
         const ggml_tensor *scale = mul->src[1];
 
@@ -14746,6 +14769,17 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD })) {
                 ctx->num_additional_fused_ops = 1;
                 fusion_string = "MUL_MAT_ADD";
+                op_srcs_fused_elementwise[0] = false;
+                op_srcs_fused_elementwise[1] = true;
+            } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL, GGML_OP_ADD })) {
+                ctx->num_additional_fused_ops = 2;
+                fusion_string = "MUL_MAT_MUL_ADD";
+                op_srcs_fused_elementwise[0] = false;
+                op_srcs_fused_elementwise[1] = true;
+                op_srcs_fused_elementwise[2] = true;
+            } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL })) {
+                ctx->num_additional_fused_ops = 1;
+                fusion_string = "MUL_MAT_MUL";
                 op_srcs_fused_elementwise[0] = false;
                 op_srcs_fused_elementwise[1] = true;
             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT_ID, GGML_OP_ADD_ID, GGML_OP_MUL })) {
