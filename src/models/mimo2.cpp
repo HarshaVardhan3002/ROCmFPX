@@ -134,13 +134,13 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
                 Vcur = ggml_view_3d(ctx0, qkv, n_embd_head_v, n_head_kv_l, n_tokens, row_v, row_full, v_off);
             } else {
                 // Split path
-                Qcur = build_lora_mm(model.layers[il].wq, cur);
+                Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
                 cb(Qcur, "Qcur", il);
 
-                Kcur = build_lora_mm(model.layers[il].wk, cur);
+                Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
                 cb(Kcur, "Kcur", il);
 
-                Vcur = build_lora_mm(model.layers[il].wv, cur);
+                Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s);
                 cb(Vcur, "Vcur", il);
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k, n_head_l,    n_tokens);
@@ -366,9 +366,9 @@ llama_model_mimo2::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
 
     GGML_ASSERT(layer.ffn_gate && layer.ffn_down && layer.ffn_up && "MIMO2 MTP requires dense FFN tensors");
     cur = build_ffn(cur,
-            layer.ffn_up,   layer.ffn_up_b,   nullptr,
-            layer.ffn_gate, layer.ffn_gate_b, nullptr,
-            layer.ffn_down, layer.ffn_down_b, nullptr,
+            layer.ffn_up,   layer.ffn_up_b,   layer.ffn_up_s,
+            layer.ffn_gate, layer.ffn_gate_b, layer.ffn_gate_s,
+            layer.ffn_down, layer.ffn_down_b, layer.ffn_down_s,
             nullptr,
             LLM_FFN_SILU, LLM_FFN_PAR, il);
     cb(cur, "mtp_ffn_out", il);

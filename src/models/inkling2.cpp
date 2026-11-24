@@ -372,11 +372,11 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         }
         cb(xq, "attn_norm", il);
 
-        ggml_tensor * Qcur  = build_lora_mm(layer.wq, xq);
-        ggml_tensor * Kcur  = build_lora_mm(layer.wk, xk);
-        ggml_tensor * Vcur  = build_lora_mm(layer.wv, xv);
+        ggml_tensor * Qcur  = build_lora_mm(layer.wq, xq, layer.wq_s);
+        ggml_tensor * Kcur  = build_lora_mm(layer.wk, xk, layer.wk_s);
+        ggml_tensor * Vcur  = build_lora_mm(layer.wv, xv, layer.wv_s);
         ggml_tensor * Rcur  = build_lora_mm(layer.attn_rel, xq);
-        ggml_tensor * gate  = build_lora_mm(layer.wqkv_gate, xq);
+        ggml_tensor * gate  = build_lora_mm(layer.wqkv_gate, xq, layer.wqkv_gate_s);
         ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, xq);      // [nh, n_tokens]
 
         ggml_tensor * k_dyn = is_swa ? nullptr : build_lora_mm(layer.attn_k_conv_dyn, xk);
@@ -475,7 +475,7 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
         cb(cur, "kqv_out", il);
 
         cur = ggml_mul(ctx0, cur, ggml_sigmoid(ctx0, gate));
-        cur = build_lora_mm(layer.wo, cur);
+        cur = build_lora_mm(layer.wo, cur, layer.wo_s);
         cb(cur, "attn_out", il);
 
         cur = short_conv(cur, conv_rs, conv_state, 2*kv_dim, layer.attn_post_conv, nullptr, 0, il);
@@ -531,7 +531,7 @@ llama_model_inkling2::graph::graph(const llama_model & model, const llm_graph_pa
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
 
     const float cap = hparams.f_final_logit_softcapping;
     cur = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/cap)), cap);

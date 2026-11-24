@@ -111,7 +111,7 @@ llama_model_muse_spark::graph::graph(const llama_model & model, const llm_graph_
             auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur,
                     n_embd_head, n_head, n_head_kv, il);
 
-            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur);
+            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur, model.layers[il].wqkv_gate_s);
             cb(gate, "attn_gate_proj", il);
 
             // attn_q_norm carries the metap scale, attn_k_norm is identity.

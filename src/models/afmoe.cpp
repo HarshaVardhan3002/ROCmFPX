@@ -149,7 +149,7 @@ llama_model_afmoe::graph::graph(const llama_model & model, const llm_graph_param
                     n_embd_head, n_head, n_head_kv, il);
 
             // compute gate from input
-            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
             cb(gate, "attn_gate_proj", il);
 
             // Q/K normalization

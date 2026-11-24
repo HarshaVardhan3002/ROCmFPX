@@ -291,7 +291,7 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
 
             cur = ggml_reshape_4d(ctx0, cur, cur->ne[0], n_seq_tokens, 1, n_seqs);
 
-            ggml_tensor * QKVcur = build_lora_mm(model.layers[il].wqkv, cur);
+            ggml_tensor * QKVcur = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s);
             cb(QKVcur, "QKVcur", il);
 
             QKVcur = ggml_silu(ctx0, QKVcur);

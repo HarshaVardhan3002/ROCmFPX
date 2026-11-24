@@ -174,11 +174,11 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
             // reuse KV cache of earlier layers
             ggml_tensor * Qcur;
             if (model.layers[il].wqkv) {
-                ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur);
+                ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s);
                 const int64_t q_dim = n_embd_head * n_head;
                 Qcur = ggml_cont(ctx0, ggml_view_2d(ctx0, qkv, q_dim, n_tokens, qkv->nb[1], 0));
             } else {
-                Qcur = build_lora_mm(model.layers[il].wq, cur);
+                Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
             }
             cb(Qcur, "Qcur", il);
             Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
@@ -209,8 +209,8 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
         // feed-forward network
         {
-            ggml_tensor * up_proj   = build_lora_mm(model.layers[il].ffn_up, cur);
-            ggml_tensor * gate_proj = build_lora_mm(model.layers[il].ffn_gate, cur);
+            ggml_tensor * up_proj   = build_lora_mm(model.layers[il].ffn_up, cur, model.layers[il].ffn_up_s);
+            ggml_tensor * gate_proj = build_lora_mm(model.layers[il].ffn_gate, cur, model.layers[il].ffn_gate_s);
 
             if (il < n_layer_sparsity) {
                 // apply activation sparsity
@@ -219,7 +219,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
             gate_proj = ggml_gelu(ctx0, gate_proj);
 
             cur = ggml_mul(ctx0, up_proj, gate_proj);
-            cur = build_lora_mm(model.layers[il].ffn_down, cur);
+            cur = build_lora_mm(model.layers[il].ffn_down, cur, model.layers[il].ffn_down_s);
             cb(cur, "ffn_out", il);
         }
         cur = build_norm(cur, model.layers[il].ffn_post_norm, NULL, LLM_NORM_RMS, -1);

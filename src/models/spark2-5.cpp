@@ -94,7 +94,7 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
                 Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
         cb(cur, "attn_out", il);
 
-        ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+        ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
         gate = ggml_sigmoid(ctx0, gate);
         cb(gate, "attn_gate", il);
 
@@ -120,9 +120,9 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
         cb(cur, "ffn_norm", il);
 
         cur = build_ffn(cur,
-                model.layers[il].ffn_up, nullptr, nullptr,
-                model.layers[il].ffn_gate, nullptr, nullptr,
-                model.layers[il].ffn_down, nullptr, nullptr,
+                model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
+                model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                 nullptr,
                 LLM_FFN_GELU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
@@ -138,7 +138,7 @@ llama_model_spark2_5::graph::graph(const llama_model & model, const llm_graph_pa
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 }

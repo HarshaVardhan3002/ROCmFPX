@@ -209,7 +209,7 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
             // g_proj on the *pre-attention* hidden state (matches HF
             // reference: gate is computed from the same `hidden_states`
             // input as q/k/v, not from the attn output).
-            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+            ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
             cb(gate, "attn_gate_proj", il);
 
             // QK RMSNorm at head_dim level (Qwen3 style)
@@ -326,7 +326,7 @@ llama_model_laguna::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 }

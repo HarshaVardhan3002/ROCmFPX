@@ -255,7 +255,7 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
             cb(attn_out, "attn_out", il);
             // head-wise attention gate: sigmoid(g_proj(x)) in torch
             if (model.layers[il].wqkv_gate) {
-                ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur); // [n_head_l, n_tokens]
+                ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, cur, model.layers[il].wqkv_gate_s); // [n_head_l, n_tokens]
                 cb(gate, "attn_gate", il);
 
                 gate = ggml_sigmoid(ctx0, gate);
@@ -293,9 +293,9 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
         if (model.layers[il].ffn_gate_inp == nullptr) {
             // dense MLP
             cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   nullptr,
-                    model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, nullptr,
-                    model.layers[il].ffn_down, model.layers[il].ffn_down_b, nullptr,
+                    model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   model.layers[il].ffn_up_s,
+                    model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, model.layers[il].ffn_gate_s,
+                    model.layers[il].ffn_down, model.layers[il].ffn_down_b, model.layers[il].ffn_down_s,
                     nullptr,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
@@ -316,9 +316,9 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
 
             // shared expert MLP (always added on MoE layers in Step35)
             ggml_tensor * sh_out = build_ffn(cur,
-                    model.layers[il].ffn_up_shexp,   nullptr, nullptr,
-                    model.layers[il].ffn_gate_shexp, nullptr, nullptr,
-                    model.layers[il].ffn_down_shexp, nullptr, nullptr,
+                    model.layers[il].ffn_up_shexp,   nullptr, model.layers[il].ffn_up_shexp_s,
+                    model.layers[il].ffn_gate_shexp, nullptr, model.layers[il].ffn_gate_shexp_s,
+                    model.layers[il].ffn_down_shexp, nullptr, model.layers[il].ffn_down_shexp_s,
                     nullptr,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(sh_out, "ffn_shared_out", il);
@@ -410,7 +410,7 @@ llama_model_step35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
     cb(concat, "mtp_concat", il);
 
-    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat);
+    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat, layer.nextn.eh_proj_s);
     cb(cur, "mtp_eh_proj", il);
 
     ggml_tensor * inpSA = cur;
@@ -464,7 +464,7 @@ llama_model_step35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
 
     // head-wise attention gate: sigmoid(g_proj(x))
     if (layer.wqkv_gate) {
-        ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, cur); // [n_head_l, n_tokens]
+        ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, cur, layer.wqkv_gate_s); // [n_head_l, n_tokens]
         cb(gate, "mtp_attn_gate", il);
 
         gate = ggml_sigmoid(ctx0, gate);
@@ -494,9 +494,9 @@ llama_model_step35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     // FFN: dense MLP or MoE (mirrors trunk path)
     if (layer.ffn_gate_inp == nullptr) {
         cur = build_ffn(cur,
-                layer.ffn_up,   layer.ffn_up_b,   nullptr,
-                layer.ffn_gate, layer.ffn_gate_b, nullptr,
-                layer.ffn_down, layer.ffn_down_b, nullptr,
+                layer.ffn_up,   layer.ffn_up_b,   layer.ffn_up_s,
+                layer.ffn_gate, layer.ffn_gate_b, layer.ffn_gate_s,
+                layer.ffn_down, layer.ffn_down_b, layer.ffn_down_s,
                 nullptr,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(cur, "mtp_ffn_out", il);
@@ -515,9 +515,9 @@ llama_model_step35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
         cb(moe_out, "mtp_ffn_moe_out", il);
 
         ggml_tensor * sh_out = build_ffn(cur,
-                layer.ffn_up_shexp,   nullptr, nullptr,
-                layer.ffn_gate_shexp, nullptr, nullptr,
-                layer.ffn_down_shexp, nullptr, nullptr,
+                layer.ffn_up_shexp,   nullptr, layer.ffn_up_shexp_s,
+                layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+                layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
                 nullptr,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(sh_out, "mtp_ffn_shared_out", il);

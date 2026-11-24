@@ -221,13 +221,13 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
         cb(cur, "concat_embd", il);
 
         // Self-attention with concatenated input
-        ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
+        ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
         cb(Qcur, "Qcur", il);
 
-        ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
+        ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
         cb(Kcur, "Kcur", il);
 
-        ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
+        ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s);
         cb(Vcur, "Vcur", il);
 
         Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
@@ -294,15 +294,17 @@ llama_model_eagle3::graph<false>::graph(const llama_model & model, const llm_gra
 
     // lm_head - projects to draft vocabulary
     // if the draft has no own output projection, inherit the target model's lm_head
-    auto * output = model.output;
+    auto * output   = model.output;
+    auto * output_s = model.output_s;
     if (output == nullptr) {
         GGML_ASSERT(cparams.ctx_other != nullptr);
         const auto * model_other = llama_get_model(cparams.ctx_other);
 
         GGML_ASSERT(model_other->output != nullptr && "EAGLE3 decoder requires an output projection (own or from target model)");
-        output = model_other->output;
+        output   = model_other->output;
+        output_s = model_other->output_s;
     }
-    cur = build_lora_mm(output, cur);
+    cur = build_lora_mm(output, cur, output_s);
 
     if (model.d2t) {
         const int64_t n_draft_vocab = cur->ne[0];

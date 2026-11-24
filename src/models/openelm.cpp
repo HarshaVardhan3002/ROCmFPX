@@ -79,7 +79,7 @@ llama_model_openelm::graph::graph(const llama_model & model, const llm_graph_par
 
         // self-attention
         {
-            cur = build_lora_mm(model.layers[il].wqkv, cur);
+            cur = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s);
             cb(cur, "wqkv", il);
 
             cur = ggml_reshape_3d(ctx0, cur, n_embd_head_k, n_head_qkv, n_tokens);

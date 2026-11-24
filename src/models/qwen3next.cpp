@@ -321,17 +321,17 @@ std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen3next::graph::build_qkvz
 
     if (model.layers[il].wqkv) {
         // optimized path
-        ggml_tensor * qkv_mixed = build_lora_mm(model.layers[il].wqkv, input);
+        ggml_tensor * qkv_mixed = build_lora_mm(model.layers[il].wqkv, input, model.layers[il].wqkv_s);
         qkv_mixed = ggml_reshape_3d(ctx0, qkv_mixed, qkv_mixed->ne[0], n_seq_tokens, n_seqs);
         cb(qkv_mixed, "linear_attn_qkv_mixed", il);
 
-        ggml_tensor * z = build_lora_mm(model.layers[il].wqkv_gate, input);
+        ggml_tensor * z = build_lora_mm(model.layers[il].wqkv_gate, input, model.layers[il].wqkv_gate_s);
         cb(z, "z", il);
 
         return { qkv_mixed, z };
     } else {
         // legacy (slower) path
-        ggml_tensor * mixed_qkvz = build_lora_mm(model.layers[il].ssm_in, input);
+        ggml_tensor * mixed_qkvz = build_lora_mm(model.layers[il].ssm_in, input, model.layers[il].ssm_in_s);
         cb(mixed_qkvz, "linear_attn_mixed_qkvz", il);
 
         int64_t       qkvz_new_dim        = 2 * head_k_dim + 2 * head_v_dim * (num_v_heads / num_k_heads);
@@ -547,7 +547,7 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
     cb(final_output, "final_output", il);
 
     // Output projection
-    cur = build_lora_mm(model.layers[il].ssm_out, final_output);
+    cur = build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
     cb(cur, "linear_attn_out", il);
 
     return cur;

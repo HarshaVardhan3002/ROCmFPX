@@ -206,7 +206,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_attn_layer(llm_graph_input
     // self-attention
     {
         // PLaMo-2 uses combined QKV tensor
-        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur);
+        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s);
         cb(qkv, "wqkv", il);
 
         // split QKV tensor into Q, K, V
@@ -288,7 +288,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
     cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
 
     // in_proj: {n_embd, 2*d_inner} @ {n_embd, n_seq_tokens, n_seqs} => {2*d_inner, n_seq_tokens, n_seqs}
-    ggml_tensor * zx = build_lora_mm(model.layers[il].ssm_in, cur);
+    ggml_tensor * zx = build_lora_mm(model.layers[il].ssm_in, cur, model.layers[il].ssm_in_s);
     cb(zx, "mamba_in_proj", il);
     // {8192, 5, 1, 1} -> {8192, 1, 5, 1}
     zx = ggml_permute(ctx0, zx, 0, 2, 1, 3);
@@ -412,7 +412,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
 
         // out_proj: {d_inner, n_embd} @ {d_inner, n_seq_tokens, n_seqs} => {n_embd, n_seq_tokens, n_seqs}
         y   = ggml_view_3d(ctx0, y, head_dim * n_heads, n_seq_tokens, n_seqs, y->nb[2], y->nb[3], 0);
-        cur = build_lora_mm(model.layers[il].ssm_out, y);
+        cur = build_lora_mm(model.layers[il].ssm_out, y, model.layers[il].ssm_out_s);
         cb(cur, "mamba_out_proj", il);
     }
 
