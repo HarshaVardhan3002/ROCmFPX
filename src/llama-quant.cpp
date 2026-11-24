@@ -886,6 +886,30 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M) new_type = GGML_TYPE_IQ3_S;
             }
         }
+    } else if (ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ1_S) {
+        // same protection as the stock IQ2_XXS / IQ1_S mixes, with ROCmFPX types for the promoted tensors
+        const bool iq1 = ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ1_S;
+        if (category_is_attn_v(category)) {
+            if (qs.model.hparams.n_gqa() >= 4 || qs.model.hparams.n_expert >= 4) new_type = GGML_TYPE_Q4_0_ROCMFP4;
+            else new_type = iq1 ? GGML_TYPE_ROCMIQ2_XXS : GGML_TYPE_Q3_0_ROCMFPX;
+            ++qs.i_attention_wv;
+        }
+        else if (qs.model.hparams.n_expert == 8 && category == tensor_category::ATTENTION_K) {
+            new_type = GGML_TYPE_Q4_0_ROCMFP4;
+        }
+        else if (category == tensor_category::FFN_DOWN) {
+            if (qs.i_ffn_down < qs.n_ffn_down/8) {
+                new_type = iq1 ? GGML_TYPE_ROCMIQ2_XXS : GGML_TYPE_Q3_0_ROCMFPX;
+            }
+            ++qs.i_ffn_down;
+        }
+        else if (category == tensor_category::ATTENTION_OUTPUT) {
+            if (qs.model.hparams.n_expert == 8) {
+                new_type = GGML_TYPE_Q4_0_ROCMFP4;
+            } else if (iq1) {
+                new_type = GGML_TYPE_ROCMIQ2_XXS;
+            }
+        }
     } else if (category_is_attn_v(category)) {
         if (rocmfpx_is_q3_family(ftype)) {
             auto info = layer_from_name(name, (int) qs.model.hparams.n_layer_all);
