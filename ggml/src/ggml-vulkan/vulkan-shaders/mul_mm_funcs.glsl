@@ -104,14 +104,20 @@ uint rocmfpt_mm_byte(uint ib, uint slot) {
     return slot < 48u ? uint(data_a[ib].qs[slot]) : uint(data_a[ib].qh[slot - 48u]);
 }
 
+// 4 aligned weights share one plane n of 4 neighbouring bytes, which form one 32-bit word (word 12 = qh):
+// one load, then all four trits decode at once, two bytes per 32-bit lane (codes 0..2 for -1..1).
 vec4 rocmfpt_mm_vec4(uint ib, uint idx) {
     uint slot, n;
     rocmfpt_pos(idx, slot, n);
-    const vec4 q = vec4(rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 0u), n),
-                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 1u), n),
-                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 2u), n),
-                        rocmfpt_trit(rocmfpt_mm_byte(ib, slot + 3u), n));
-    return q * ue4m3_to_fp32(data_a[ib].e[idx >> 6u]);
+    const uint w = data_a_packed32[ib].qs[slot >> 2u];
+    const uint m = n == 0u ? 1u : (n == 1u ? 3u : (n == 2u ? 9u : (n == 3u ? 27u : 81u)));
+    uint lo = ((w & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    uint hi = (((w >> 8) & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    lo = (lo * 3u) >> 8;
+    hi = (hi * 3u) >> 8;
+    const vec4 q = vec4(float(lo & 3u), float(hi & 3u), float((lo >> 16) & 3u), float((hi >> 16) & 3u)) - 1.0;
+    const uint e = (data_a_packed32[ib].e >> (8u * (idx >> 6u))) & 255u;
+    return q * ue4m3_to_fp32(uint8_t(e));
 }
 #endif
 

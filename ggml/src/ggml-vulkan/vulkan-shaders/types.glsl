@@ -1955,6 +1955,12 @@ struct block_rocmfpt
     uint8_t e[4];
 };
 
+struct block_rocmfpt_packed32
+{
+    uint32_t qs[13];    // qs[0..11] = the 48 base-3 bytes, qs[12] = the 4 qh bytes
+    uint32_t e;
+};
+
 struct block_rocmfpl_packed32
 {
     uint32_t qs[16];
@@ -1974,6 +1980,7 @@ struct block_rocmfpl_packed32
 #define QUANT_R 1
 #define QUANT_AUXF 1
 #define A_TYPE block_rocmfpt
+#define A_TYPE_PACKED32 block_rocmfpt_packed32
 #endif
 
 

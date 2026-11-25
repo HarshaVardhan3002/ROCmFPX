@@ -692,3 +692,40 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
     return FLOAT_TYPE(float(cache_b_ds.x) * d * float(q_sum));
 }
 #endif
+
+#if defined(DATA_A_ROCMFPT)
+// trit n (m = 3^n) of each byte of w, as bytes 0..2: per 16-bit lane, ((byte * m) & 255) * 3 >> 8
+uint fpt_trits4(const uint w, const uint m) {
+    uint lo = ((w & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    uint hi = (((w >> 8) & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    lo = ((lo * 3u) >> 8) & 0x00030003u;
+    hi = ((hi * 3u) >> 8) & 0x00030003u;
+    return lo | (hi << 8);
+}
+
+// one q8_1 block = 32 weights 32c .. 32c+31 of a 256-weight block, in UE4M3 scale group c / 2.
+// c < 5: trit c of qs bytes 0..31. c = 5, 6: trits 2(c-5) and 2(c-5)+1 of qs bytes 32..47.
+// c = 7: trit 4 of qs bytes 32..47, then trits 0..3 of the qh bytes (word 12).
+// The codes are 0..2 for -1..1; the -1 comes off through the q8_1 block sum (cache_b_ds.y).
+// Thread t always reads q8_1 block t of each K_PER_ITER * BLOCK_SIZE stride and rows hold a multiple of 8 such
+// blocks, so c == ib_a % 8 == tid % 8 for every call: taking it from the thread index lets the compiler hoist the
+// word / trit selection below out of the row and column loops.
+FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+    const uint ib = ib_a / 8;
+    const uint c = gl_LocalInvocationID.x % 8u;
+    const bool lo5 = c < 5u;
+    const uint n_hi = 2u * (c - 5u);
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint k = 0; k < 8; ++k) {
+        const bool qh_word = c == 7u && k >= 4u;
+        const uint wi = lo5 ? k : (qh_word ? 12u : 8u + (k & 3u));
+        const uint n = lo5 ? c : (qh_word ? k - 4u : n_hi + (k >> 2));
+        const uint m = n == 0u ? 1u : (n == 1u ? 3u : (n == 2u ? 9u : (n == 3u ? 27u : 81u)));
+        q_sum += dotPacked4x8EXT(int32_t(fpt_trits4(data_a_packed32[ib].qs[wi], m)), cache_b_qs[k]);
+    }
+
+    const float d = ue4m3_to_fp32(uint8_t((data_a_packed32[ib].e >> (8u * (c >> 1))) & 255u));
+    return FLOAT_TYPE(d * (float(q_sum) * float(cache_b_ds.x) - float(cache_b_ds.y)));
+}
+#endif
