@@ -345,6 +345,31 @@ void llama_model_saver::add_kv_from_model() {
     add_kv(LLM_KV_HASH_LAYER_COUNT,                     hparams.dsv4_hash_layer_count);
     add_kv(LLM_KV_HYPER_CONNECTION_LOW_RANK,             hparams.hc_low_rank);
 
+    if (model->arch == LLM_ARCH_SENSENOVA_LOOP) {
+        // the loop and the mHC streams (the loader requires the loop keys)
+        add_kv(LLM_KV_LOOP_START, hparams.loop_start);
+        add_kv(LLM_KV_LOOP_END,   hparams.loop_end);
+        add_kv(LLM_KV_LOOP_COUNT, hparams.loop_count);
+        if (hparams.mhc_streams > 0) {
+            add_kv(LLM_KV_HYPER_CONNECTION_COUNT,               hparams.mhc_streams);
+            add_kv(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERATIONS, hparams.mhc_iters);
+            add_kv(LLM_KV_MHC_START,                            hparams.mhc_start);
+            add_kv(LLM_KV_MHC_END,                              hparams.mhc_end);
+            add_kv(LLM_KV_MHC_PRE_SCALE,                        hparams.mhc_pre_scale);
+            add_kv(LLM_KV_MHC_FIXED_IDENTITY,                   hparams.mhc_fixed_identity);
+        }
+    }
+
+    if (model->arch == LLM_ARCH_KOLIBRI1 && hparams.indexer_top_k > 0) {
+        // Kolibri-1.1 sparse attention: the loader requires the block pool and the per-layer KV sources
+        const auto * mk = dynamic_cast<const llama_model_kolibri1 *>(model);
+        GGML_ASSERT(mk != nullptr);
+        add_kv(LLM_KV_ATTENTION_INDEXER_CANDIDATE_BLOCK_SIZE,   mk->n_pool_block);
+        add_kv(LLM_KV_ATTENTION_INDEXER_CANDIDATE_TOP_K_BLOCKS, mk->n_pool_blocks);
+        add_kv(LLM_KV_ATTENTION_KV_SOURCE_MAP, std::vector<uint32_t>(
+                hparams.kv_source_impl.begin(), hparams.kv_source_impl.begin() + hparams.n_layer()));
+    }
+
     if (model->arch == LLM_ARCH_DEEPSEEK41) {
         const auto * m41 = dynamic_cast<const llama_model_deepseek41 *>(model);
         GGML_ASSERT(m41 != nullptr);

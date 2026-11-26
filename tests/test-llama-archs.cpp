@@ -184,6 +184,8 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     uint32_t n_layer = 2;
     if (arch == LLM_ARCH_LLAMA4) {
         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
+    } else if (arch == LLM_ARCH_SENSENOVA_LOOP) {
+        n_layer = 4; // 4 cache slots: physical layers 0 and 1 (recurrent, full attention) run twice
     } else if (arch == LLM_ARCH_MAION_CODER) {
         n_head = 4;
         n_layer = 4; // dense and MoE layers, each with local and full attention
@@ -425,6 +427,25 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
 
     if (arch == LLM_ARCH_KOLIBRI1) {
         ms.add_kv(LLM_KV_EXPERT_WEIGHTS_NORM, false);
+        // Kolibri-1.1 sparse attention (the shared indexer top_k below is > 0): an indexer on every
+        // full-attention layer, each layer reads its own K/V
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_CANDIDATE_BLOCK_SIZE,   uint32_t(16));
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_CANDIDATE_TOP_K_BLOCKS, uint32_t(4));
+        std::vector<uint32_t> indexer_types;
+        std::vector<uint32_t> kv_source;
+        for (uint32_t il = 0; il < n_layer; il++) {
+            indexer_types.push_back(il % 2 ? 0 : 1);
+            kv_source.push_back(il);
+        }
+        ms.add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
+        ms.add_kv(LLM_KV_ATTENTION_KV_SOURCE_MAP, kv_source);
+    }
+
+    if (arch == LLM_ARCH_SENSENOVA_LOOP) {
+        // physical layers [0, 2) run twice (n_layer above counts the 4 cache slots)
+        ms.add_kv(LLM_KV_LOOP_START, uint32_t(0));
+        ms.add_kv(LLM_KV_LOOP_END,   uint32_t(2));
+        ms.add_kv(LLM_KV_LOOP_COUNT, uint32_t(2));
     }
 
     if (arch == LLM_ARCH_RAON1) {
@@ -651,7 +672,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_XIELU_ALPHA_P,             1.0f);
     ms.add_kv(LLM_KV_XIELU_BETA,                1.0f);
     ms.add_kv(LLM_KV_XIELU_EPS,                 1.0e-7f);
-    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_CLOVER_MOE || arch == LLM_ARCH_QWEN4EXP ? 256 : 2*n_embd);
+    ms.add_kv(LLM_KV_SSM_INNER_SIZE,            arch == LLM_ARCH_QWEN3NEXT || arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_SENSENOVA_LOOP || arch == LLM_ARCH_QWEN35MOE || arch == LLM_ARCH_CLOVER_MOE || arch == LLM_ARCH_QWEN4EXP ? 256 : 2*n_embd);
     ms.add_kv(LLM_KV_SSM_CONV_KERNEL,           uint32_t(4));
     ms.add_kv(LLM_KV_SSM_STATE_SIZE,            uint32_t(128));
     ms.add_kv(LLM_KV_SSM_TIME_STEP_RANK,        n_head);
