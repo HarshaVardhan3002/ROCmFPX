@@ -2933,6 +2933,10 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
 }
 
+const llama_kv_cells & llama_kv_cache_context::get_cells(llama_seq_id seq_id) const {
+    return kv->get_cells(seq_id);
+}
+
 ggml_type llama_kv_cache_context::type_k() const {
     return kv->type_k();
 }
