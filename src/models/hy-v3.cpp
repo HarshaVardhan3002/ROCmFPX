@@ -276,7 +276,7 @@ llama_model_hy_v3::graph_mtp::graph_mtp(const llama_model & model, const llm_gra
     ggml_tensor * concat = ggml_concat(ctx0, e_norm, h_norm, /*dim=*/ 0);
     cb(concat, "mtp_concat", il);
 
-    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat);
+    ggml_tensor * cur = build_lora_mm(layer.nextn.eh_proj, concat, layer.nextn.eh_proj_s);
     cb(cur, "mtp_eh_proj", il);
 
     ggml_tensor * inpSA = cur;

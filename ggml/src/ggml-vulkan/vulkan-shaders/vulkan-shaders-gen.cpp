@@ -78,6 +78,10 @@ const std::vector<std::string> type_names = {
     "rocmfpx_fp3",
     "rocmfpx_fp6",
     "rocmfpx_fp8",
+    "rocmfpl",
+    "rocmfpt",
+    "rocmiq2_xxs",
+    "rocmiq1_s",
     "tq1_0",
     "tq2_0",
     "bf16",
@@ -253,7 +257,7 @@ bool is_iq_quant(const std::string& type_name) {
 }
 
 bool is_rocm_quant(const std::string& type_name) {
-    return string_starts_with(type_name, "rocmfp");
+    return string_starts_with(type_name, "rocmfp") || string_starts_with(type_name, "rocmiq");
 }
 
 bool is_lut_quant(const std::string& type_name) {
@@ -262,7 +266,7 @@ bool is_lut_quant(const std::string& type_name) {
 
 std::string lut_load_vec_a(const std::string& type_name) {
     if (type_name == "iq1_s" || type_name == "iq1_m" || type_name == "iq2_xxs" || type_name == "iq2_xs" || type_name == "iq2_s" || type_name == "iq4_xs" ||
-        type_name == "rocmfp4" || type_name == "rocmfp4_fast") {
+        type_name == "rocmfp4" || type_name == "rocmfp4_fast" || type_name == "rocmiq2_xxs") {
         return "8";
     }
     return "4";
@@ -795,7 +799,7 @@ void process_shaders() {
     for (const auto& tname : type_names) {
         // mul mat vec
         std::string data_a_key = "DATA_A_" + to_uppercase(tname);
-        std::string shader = (string_ends_with(tname, "_k") || string_starts_with(tname, "iq1_") || string_starts_with(tname, "iq2_") || string_starts_with(tname, "iq3_") || tname == "iq4_xs" || tname == "tq2_0" || tname == "tq1_0") ? "mul_mat_vec_" + tname + ".comp" : "mul_mat_vec.comp";
+        std::string shader = (string_ends_with(tname, "_k") || string_starts_with(tname, "iq1_") || string_starts_with(tname, "iq2_") || string_starts_with(tname, "iq3_") || tname == "iq4_xs" || tname == "tq2_0" || tname == "tq1_0" || tname == "rocmfpt" || tname == "rocmfpl" || tname == "rocmiq2_xxs" || tname == "rocmiq1_s") ? "mul_mat_vec_" + tname + ".comp" : "mul_mat_vec.comp";
 
         string_to_spv("mul_mat_vec_" + tname + "_f32_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"B_TYPEV2", "vec2"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}}));
         string_to_spv("mul_mat_vec_" + tname + "_f16_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"B_TYPEV2", "f16vec2"}, {"B_TYPEV4", "f16vec4"}, {"D_TYPE", "float"}}));
@@ -827,7 +831,7 @@ void process_shaders() {
         // mul mat vec with integer dot product
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
         if (is_legacy_quant(tname) || tname == "mxfp4" || is_k_quant(tname) || tname == "iq1_s" || tname == "iq1_m" || tname == "iq4_xs" ||
-            tname == "rocmfp4" || tname == "rocmfp4_fast") {
+            tname == "rocmfp4" || tname == "rocmfp4_fast" || tname == "rocmiq2_xxs" || tname == "rocmiq1_s" || tname == "rocmfpt") {
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}}));
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
             string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
@@ -835,6 +839,12 @@ void process_shaders() {
             string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}}));
             string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
             string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+        }
+        // short-row MoE expert mat-vec (a 64-weight group per lane, rows in parallel, clustered row sums),
+        // and the same kernel for up + gate + SWIGLU in one pass
+        if (tname == "rocmiq2_xxs" || tname == "iq3_xxs") {
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_expert", "mul_mat_vecq_expert.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_expert_glu", "mul_mat_vecq_expert.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}, {"ACC_TYPE", "float"}, {"GATE_GLU", "1"}}));
         }
 #endif
 
@@ -1355,7 +1365,7 @@ void write_output_files() {
     for (const std::string& btype : btypes) {
     for (const auto& tname : type_names) {
         if (btype == "q8_1" && !is_legacy_quant(tname) && tname != "mxfp4" && !is_k_quant(tname) && tname != "iq1_s" && tname != "iq1_m" && tname != "iq4_xs" &&
-            tname != "rocmfp4" && tname != "rocmfp4_fast") {
+            tname != "rocmfp4" && tname != "rocmfp4_fast" && tname != "rocmiq2_xxs" && tname != "rocmiq1_s" && tname != "rocmfpt") {
             continue;
         }
         hdr << "extern const void * arr_dmmv_"   << tname << "_" << btype << "_f32_data[3];\n";

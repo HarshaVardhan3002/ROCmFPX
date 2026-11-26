@@ -353,7 +353,7 @@ llama_model_lfm2::graph_decision::graph_decision(const llama_model & model, cons
         cb(cur, "model.layers.{}.operator_norm", il);
 
         if (hparams.is_recr(il)) {
-            ggml_tensor * bcx = build_lora_mm(layer.shortconv.in_proj, cur);
+            ggml_tensor * bcx = build_lora_mm(layer.shortconv.in_proj, cur, layer.shortconv.in_proj_s);
             cb(bcx, "model.layers.{}.conv.in_proj", il);
 
             ggml_tensor * b = ggml_view_2d(ctx0, bcx, n_embd, n_tokens, bcx->nb[1], 0 * n_embd * ggml_element_size(bcx));
@@ -377,7 +377,7 @@ llama_model_lfm2::graph_decision::graph_decision(const llama_model & model, cons
             y = ggml_add(ctx0, y, ggml_mul(ctx0, ggml_mul(ctx0, nxt, tap2), conv_right));
             cb(y, "model.layers.{}.conv.conv", il);
 
-            cur = build_lora_mm(layer.shortconv.out_proj, ggml_mul(ctx0, c, y));
+            cur = build_lora_mm(layer.shortconv.out_proj, ggml_mul(ctx0, c, y), layer.shortconv.out_proj_s);
             cb(cur, "model.layers.{}.conv.out_proj", il);
         } else {
             auto [q, k, v] = build_qkv(layer, cur, n_embd_head, n_head, hparams.n_head_kv(il), il);

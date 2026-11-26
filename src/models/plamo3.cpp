@@ -102,7 +102,7 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
-        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur);
+        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s);
         cb(cur, "wqkv", il);
 
         const int32_t n_head    = hparams.n_head(il);

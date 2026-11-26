@@ -384,7 +384,7 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
                 }
                 cb(cur, "attn_out", il);
 
-                ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp);
+                ggml_tensor * gate = build_lora_mm(model.layers[il].wqkv_gate, attn_inp, model.layers[il].wqkv_gate_s);
                 cb(gate, "attn_gate", il);
 
                 gate = ggml_sigmoid(ctx0, gate);

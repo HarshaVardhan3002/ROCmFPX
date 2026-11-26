@@ -1,0 +1,84 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+// 16 lanes per block: lane l reads code words 2l and 2l+1 = weights 16l .. 16l+15 (sub group l/4).
+// value = sub_scale / 8 * (+/-grid + shift): the shift part is +/-4 * sum(b) of the 8 weights, so the
+// 8-weight sums of b are computed once per block and reused for every row.
+float rocmiq2_dot8(const uint code, const vec4 b0, const vec4 b1, const float bsum) {
+    const uvec2 g = iq2xxs_grid[code & 0xFFu];
+    const vec4 g0 = vec4(unpack8(g.x));
+    const vec4 g1 = vec4(unpack8(g.y));
+    const uint s7 = (code >> 8u) & 0x7Fu;
+    const uint s8 = uint(bitCount(s7)) & 1u;
+    float sum =
+          fma(b0.x, (s7 &  1u) != 0u ? -g0.x : g0.x,
+          fma(b0.y, (s7 &  2u) != 0u ? -g0.y : g0.y,
+          fma(b0.z, (s7 &  4u) != 0u ? -g0.z : g0.z,
+          fma(b0.w, (s7 &  8u) != 0u ? -g0.w : g0.w,
+          fma(b1.x, (s7 & 16u) != 0u ? -g1.x : g1.x,
+          fma(b1.y, (s7 & 32u) != 0u ? -g1.y : g1.y,
+          fma(b1.z, (s7 & 64u) != 0u ? -g1.z : g1.z,
+              b1.w * (s8 != 0u ? -g1.w : g1.w))))))));
+    return fma((code & 0x8000u) != 0u ? -4.0 : 4.0, bsum, sum);
+}
+
+void compute_outputs(const uint first_row, const uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+
+    const uint nb = p.ncols / QUANT_K;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint l = tid % 16u;
+    const uint g = l >> 2;
+    const uint bstep = gl_WorkGroupSize.x / 16u;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint i = 0; i < NUM_ROWS; ++i) {
+            temp[j][i] = FLOAT_TYPE(0);
+        }
+    }
+
+    for (uint i = tid / 16u; i < nb; i += bstep) {
+        [[unroll]] for (uint jcol = 0; jcol < NUM_COLS; ++jcol) {
+            const uint bv = (jcol * p.batch_stride_b + b_offset + i * QUANT_K + 16u * l) / 4u;
+            const vec4 b0 = vec4(data_b_v4[bv + 0u]);
+            const vec4 b1 = vec4(data_b_v4[bv + 1u]);
+            const vec4 b2 = vec4(data_b_v4[bv + 2u]);
+            const vec4 b3 = vec4(data_b_v4[bv + 3u]);
+            const float bs0 = dot(b0 + b1, vec4(1.0));
+            const float bs1 = dot(b2 + b3, vec4(1.0));
+
+            uint ib = a_offset + first_row * nb + i;
+            for (uint nrow = 0; nrow < num_rows; ++nrow) {
+                const float d = rocmiq_sub_scale(uint(data_a[ib].sc), g) * 0.125;
+                const float acc = rocmiq2_dot8(uint(data_a[ib].qs[2u * l]),      b0, b1, bs0) +
+                                  rocmiq2_dot8(uint(data_a[ib].qs[2u * l + 1u]), b2, b3, bs1);
+                temp[jcol][nrow] = fma(FLOAT_TYPE(d), FLOAT_TYPE(acc), temp[jcol][nrow]);
+                ib += nb;
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    init_iq_shmem(gl_WorkGroupSize);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, min(NUM_ROWS, p.stride_d - first_row));
+    }
+}

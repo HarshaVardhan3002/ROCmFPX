@@ -17,6 +17,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
+#include <unordered_set>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -170,6 +171,41 @@ static const llm_fused_op_probe llm_fused_op_top_k_mask_probe = {
     /*.name             =*/ "fused top-k mask",
     /*.n_tokens_per_seq =*/ 1,
 };
+
+// ROCmFPX: a weight quantized with LLAMA_ROCMFPX_TENSOR_SCALE=1 is stored as w * 2^k plus a one-element "<name>.scale"
+// tensor that the graph must multiply into the matmul output. An architecture whose graph does not pass the scale
+// (build_lora_mm / build_ffn with nullptr) gives wrong output silently, so warn when loaded scales are never used.
+static void warn_unused_tensor_scales(const llama_model & model, ggml_cgraph * gf) {
+    std::unordered_set<const ggml_tensor *> used;
+    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+        const ggml_tensor * node = ggml_graph_node(gf, i);
+        for (int j = 0; j < GGML_MAX_SRC; ++j) {
+            for (const ggml_tensor * t = node->src[j]; t != nullptr; t = t->view_src) {
+                used.insert(t);
+            }
+        }
+    }
+
+    std::vector<std::string> unused;
+    for (const auto & [name, t] : model.tensors_by_name) {
+        const size_t n = name.size();
+        if (n > 6 && name.compare(n - 6, 6, ".scale") == 0 && used.find(t) == used.end()) {
+            unused.push_back(name);
+        }
+    }
+    if (unused.empty()) {
+        return;
+    }
+
+    std::string list;
+    for (size_t i = 0; i < unused.size() && i < 4; ++i) {
+        list += (i ? ", " : "") + unused[i];
+    }
+    LLAMA_LOG_WARN("%s: %zu tensor scale(s) are loaded but not used by the %s graph (%s%s): unless they belong to a head "
+                   "this graph does not run (for example MTP layers), the output will be wrong; the architecture's graph "
+                   "has to pass these scales to build_lora_mm / build_ffn\n",
+                   __func__, unused.size(), llm_arch_name(model.arch), list.c_str(), unused.size() > 4 ? ", ..." : "");
+}
 
 llama_context::llama_context(
         const llama_model & model,
@@ -806,6 +842,8 @@ void llama_context::sched_reserve() {
                 throw std::runtime_error("failed to allocate compute pp buffers");
             }
         }
+
+        warn_unused_tensor_scales(model, gf);
 
         n_splits_pp        = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_pp         = ggml_graph_n_nodes(gf);

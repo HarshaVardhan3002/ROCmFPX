@@ -644,9 +644,9 @@ llama_model_glm5_next::graph_mtp::graph_mtp(const llama_model & model, const llm
     cb(moe_out, "mtp_ffn_moe_out", il);
 
     ggml_tensor * ffn_shexp = build_ffn(cur,
-            layer.ffn_up_shexp,   nullptr, nullptr,
-            layer.ffn_gate_shexp, nullptr, nullptr,
-            layer.ffn_down_shexp, nullptr, nullptr,
+            layer.ffn_up_shexp,   nullptr, layer.ffn_up_shexp_s,
+            layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+            layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
             nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
     cb(ffn_shexp, "mtp_ffn_shexp", il);
 
@@ -745,9 +745,9 @@ llama_model_glm5_next::graph::graph(const llama_model & model, const llm_graph_p
 
         if ((uint32_t) il < hparams.n_layer_dense_lead) {
             cur = build_ffn(cur,
-                    layer.ffn_up,   nullptr, nullptr,
-                    layer.ffn_gate, nullptr, nullptr,
-                    layer.ffn_down, nullptr, nullptr,
+                    layer.ffn_up,   nullptr, layer.ffn_up_s,
+                    layer.ffn_gate, nullptr, layer.ffn_gate_s,
+                    layer.ffn_down, nullptr, layer.ffn_down_s,
                     nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
         } else {
@@ -765,9 +765,9 @@ llama_model_glm5_next::graph::graph(const llama_model & model, const llm_graph_p
             cb(moe_out, "ffn_moe_out", il);
 
             ggml_tensor * ffn_shexp = build_ffn(cur,
-                    layer.ffn_up_shexp,   nullptr, nullptr,
-                    layer.ffn_gate_shexp, nullptr, nullptr,
-                    layer.ffn_down_shexp, nullptr, nullptr,
+                    layer.ffn_up_shexp,   nullptr, layer.ffn_up_shexp_s,
+                    layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+                    layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
                     nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(ffn_shexp, "ffn_shexp", il);
 

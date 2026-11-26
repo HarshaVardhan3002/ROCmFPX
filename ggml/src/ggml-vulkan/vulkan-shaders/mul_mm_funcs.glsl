@@ -79,6 +79,48 @@ vec4 rocmfpx_mm_fp2_vec4(uint ib, uint idx) {
 }
 #endif
 
+#if defined(DATA_A_ROCMFPL)
+vec4 rocmfpl_mm_vec4(uint ib, uint idx) {
+    const uint packed = uint(data_a[ib].qs[idx >> 2u]);
+    const vec4 q = vec4(kvalues_rocmfpx_fp2_const[ packed        & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 2u) & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 4u) & 3u],
+                        kvalues_rocmfpx_fp2_const[(packed >> 6u) & 3u]);
+    return q * ue4m3_to_fp32(data_a[ib].e[idx >> 6u]);
+}
+#endif
+
+#if defined(DATA_A_ROCMIQ1_S)
+vec4 rocmiq1_mm_vec4(uint ib, uint idx) {
+    const uint i = idx >> 2u;
+    const uint ci = ((uint(data_a[ib].ql[i >> 1u]) >> (4u * (i & 1u))) & 15u) |
+                    (((uint(data_a[ib].qh[i >> 2u]) >> (2u * (i & 3u))) & 3u) << 4u);
+    return rocmiq1_cb4(ci) * (rocmiq_sub_scale(uint(data_a[ib].sc), idx >> 6u) * 0.03125);
+}
+#endif
+
+#if defined(DATA_A_ROCMFPT)
+uint rocmfpt_mm_byte(uint ib, uint slot) {
+    return slot < 48u ? uint(data_a[ib].qs[slot]) : uint(data_a[ib].qh[slot - 48u]);
+}
+
+// 4 aligned weights share one plane n of 4 neighbouring bytes, which form one 32-bit word (word 12 = qh):
+// one load, then all four trits decode at once, two bytes per 32-bit lane (codes 0..2 for -1..1).
+vec4 rocmfpt_mm_vec4(uint ib, uint idx) {
+    uint slot, n;
+    rocmfpt_pos(idx, slot, n);
+    const uint w = data_a_packed32[ib].qs[slot >> 2u];
+    const uint m = n == 0u ? 1u : (n == 1u ? 3u : (n == 2u ? 9u : (n == 3u ? 27u : 81u)));
+    uint lo = ((w & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    uint hi = (((w >> 8) & 0x00FF00FFu) * m) & 0x00FF00FFu;
+    lo = (lo * 3u) >> 8;
+    hi = (hi * 3u) >> 8;
+    const vec4 q = vec4(float(lo & 3u), float(hi & 3u), float((lo >> 16) & 3u), float((hi >> 16) & 3u)) - 1.0;
+    const uint e = (data_a_packed32[ib].e >> (8u * (idx >> 6u))) & 255u;
+    return q * ue4m3_to_fp32(uint8_t(e));
+}
+#endif
+
 #if defined(DATA_A_ROCMFPX_FP3)
 int32_t rocmfpx_mm_fp3_pack4_window(uint ib, uint idx) {
     const uint bit_pos = idx * 3u;
@@ -447,6 +489,41 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 #endif
 #elif defined(DATA_A_ROCMFP4) || defined(DATA_A_ROCMFP4_FAST)
     store_a_raw(fetch_a_raw(pos_a, row, col), row, col);
+#elif defined(DATA_A_ROCMIQ2_XXS)
+    // one 16-bit code = 8 weights per thread (LOAD_VEC_A 8), so every code word is decoded once
+    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+    const uint k_pair = row * LOAD_VEC_A / 2;
+
+    const uint ib = idx / 32;
+    const uint ic = idx % 32;
+
+    vec4 lo, hi;
+    rocmiq2_code8(uint(data_a[ib].qs[ic]), lo, hi);
+    const float d = rocmiq_sub_scale(uint(data_a[ib].sc), ic >> 3u) * 0.125;
+    lo *= d;
+    hi *= d;
+
+    store_a(col, k_pair,     FLOAT_TYPEV2(lo.xy));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(lo.zw));
+    store_a(col, k_pair + 2, FLOAT_TYPEV2(hi.xy));
+    store_a(col, k_pair + 3, FLOAT_TYPEV2(hi.zw));
+#elif defined(DATA_A_ROCMFPL) || defined(DATA_A_ROCMFPT) || defined(DATA_A_ROCMIQ1_S)
+    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+    const uint k_pair = row * LOAD_VEC_A / 2;
+
+    const uint ib = idx / 64;
+    const uint iqs = (idx & 63u) * 4;
+
+#if defined(DATA_A_ROCMFPL)
+    const vec4 v = rocmfpl_mm_vec4(ib, iqs);
+#elif defined(DATA_A_ROCMIQ1_S)
+    const vec4 v = rocmiq1_mm_vec4(ib, iqs);
+#else
+    const vec4 v = rocmfpt_mm_vec4(ib, iqs);
+#endif
+
+    store_a(col, k_pair, FLOAT_TYPEV2(v.xy));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(v.zw));
 #elif defined(DATA_A_ROCMFPX_FP2) || defined(DATA_A_ROCMFPX_FP3) || defined(DATA_A_ROCMFPX_FP6) || defined(DATA_A_ROCMFPX_FP8)
     const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
     const uint k_pair = row * LOAD_VEC_A / 2;

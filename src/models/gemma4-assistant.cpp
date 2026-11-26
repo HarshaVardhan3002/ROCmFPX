@@ -143,7 +143,7 @@ llama_model_gemma4_assistant::graph::graph(const llama_model & model, const llm_
         ggml_tensor * cur_norm = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur_norm, "attn_norm", il);
 
-        ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur_norm);
+        ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur_norm, model.layers[il].wq_s);
         Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
         Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
         cb(Qcur, "Qcur_normed", il);
@@ -171,9 +171,9 @@ llama_model_gemma4_assistant::graph::graph(const llama_model & model, const llm_
         cb(cur, "ffn_norm", il);
 
         cur = build_ffn(cur,
-                model.layers[il].ffn_up,   nullptr, nullptr,
-                model.layers[il].ffn_gate, nullptr, nullptr,
-                model.layers[il].ffn_down, nullptr, nullptr,
+                model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
+                model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                 nullptr,
                 LLM_FFN_GELU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);
@@ -193,7 +193,7 @@ llama_model_gemma4_assistant::graph::graph(const llama_model & model, const llm_
     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
     cb(cur, "result_norm", -1);
 
-    ggml_tensor * logits = build_lora_mm(model.output, cur);
+    ggml_tensor * logits = build_lora_mm(model.output, cur, model.output_s);
     cb(logits, "result_output", -1);
     res->t_logits = logits;
 

@@ -175,6 +175,10 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_AGENT_LEAN = 117, // ROCmFPx 6-bit agent routing without Q8-heavy boosts
         LLAMA_FTYPE_MOSTLY_Q4_0_ROCMI4           = 118, // native signed-nibble 4-bit + UE4M3 (no codebook)
         LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX          = 119, // ROCmFPx 2-bit S40 codebook + dual UE4M3 scales
+        LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPL          = 120, // ROCmFP2-L 2.125 bpw, S40 codes, UE4M3 scale per 64
+        LLAMA_FTYPE_MOSTLY_Q1_0_ROCMFPT          = 121, // ROCmFP-T 1.75 bpw, ternary codes, UE4M3 scale per 64
+        LLAMA_FTYPE_MOSTLY_ROCMIQ2_XXS           = 122, // ROCmIQ2_XXS 2.0625 bpw, iq2xxs grid + shift, 16-bit scale word
+        LLAMA_FTYPE_MOSTLY_ROCMIQ1_S             = 123, // ROCmIQ1_S 1.5625 bpw, 64 x 4 codebook, 16-bit scale word
 
         LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
     };

@@ -79,11 +79,12 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
 
     for (int il = 0; il < n_layer; ++il) {
         // get either the text or image weight tensors
-        ggml_tensor *wqkv, *wo, *wo_s;
+        ggml_tensor *wqkv, *wqkv_s, *wo, *wo_s;
         ggml_tensor *ffn_gate, *ffn_down, *ffn_up;
 
         if (is_text) {
             wqkv     = model.layers[il].wqkv;
+            wqkv_s   = model.layers[il].wqkv_s;
             wo       = model.layers[il].wo;
             wo_s     = model.layers[il].wo_s;
             ffn_gate = model.layers[il].ffn_gate;
@@ -91,6 +92,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
             ffn_up   = model.layers[il].ffn_up;
         } else {
             wqkv     = model.layers[il].visexp_attn_wqkv;
+            wqkv_s   = nullptr;
             wo       = model.layers[il].visexp_attn_wo;
             wo_s     = nullptr;
             ffn_gate = model.layers[il].visexp_ffn_gate;
@@ -103,7 +105,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
 
         // build self attention
         {
-            ggml_tensor * qkv = build_lora_mm(wqkv, cur);
+            ggml_tensor * qkv = build_lora_mm(wqkv, cur, wqkv_s);
 
             // split qkv into Q, K, V along the first dimension
             ggml_tensor * Qcur =

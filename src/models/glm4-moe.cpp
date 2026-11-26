@@ -241,9 +241,9 @@ llama_model_glm4_moe::graph_mtp::graph_mtp(const llama_model & model, const llm_
     cb(routed_out, "mtp_ffn_moe_out", il);
 
     ggml_tensor * shared_out = build_ffn(cur,
-            layer.ffn_up_shexp,   nullptr, nullptr,
-            layer.ffn_gate_shexp, nullptr, nullptr,
-            layer.ffn_down_shexp, nullptr, nullptr,
+            layer.ffn_up_shexp,   nullptr, layer.ffn_up_shexp_s,
+            layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+            layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
             nullptr,
             LLM_FFN_SILU, LLM_FFN_PAR, il);
     cb(shared_out, "mtp_ffn_shexp_out", il);

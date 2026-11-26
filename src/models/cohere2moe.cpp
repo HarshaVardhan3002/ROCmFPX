@@ -267,7 +267,7 @@ llama_model_cohere2moe::graph::graph(const llama_model & model, const llm_graph_
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
 
     if (f_logit_scale) {
         cur = ggml_scale(ctx0, cur, f_logit_scale);

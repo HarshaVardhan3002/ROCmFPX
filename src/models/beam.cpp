@@ -177,7 +177,7 @@ llama_model_beam::graph::graph(const llama_model & model, const llm_graph_params
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
             cb(cur, "attn_out", il);
 
-            ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, attn_inp);
+            ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, attn_inp, layer.wqkv_gate_s);
             cb(gate, "attn_gate_proj", il);
             gate = ggml_reshape_3d(ctx0, gate, n_embd_head, n_head, n_tokens);
             gate = ggml_add(ctx0, gate, ggml_reshape_3d(ctx0, layer.wqkv_gate_b, 1, n_head, 1));

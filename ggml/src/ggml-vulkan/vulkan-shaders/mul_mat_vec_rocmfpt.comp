@@ -1,0 +1,102 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+// Decoding a base-3 byte costs about six integer ops per trit, which made this kernel ALU bound on RDNA 3.5.
+// Two tables in shared memory replace that: fpt_lut4[v] = trits 0..3 of byte v, fpt_lut1[v] = trit 4,
+// (the UE4M3 scales use the shared table behind ue4m3_to_fp32).
+shared vec4 fpt_lut4[256];
+shared float fpt_lut1[256];
+
+float fpt_t(const uint v, const uint m) {
+    return float(int(((((v * m) & 255u) * 3u) >> 8)) - 1);
+}
+
+void init_fpt_shmem() {
+    for (uint v = gl_LocalInvocationIndex; v < 256u; v += gl_WorkGroupSize.x) {
+        fpt_lut4[v] = vec4(fpt_t(v, 1u), fpt_t(v, 3u), fpt_t(v, 9u), fpt_t(v, 27u));
+        fpt_lut1[v] = fpt_t(v, 81u);
+    }
+    barrier();
+}
+
+// 16 lanes per block: lane l owns qs bytes l, l+16, 32+l (5 trits each) and, for l < 4, qh byte l (4 trits).
+// B values of a block are loaded once and reused for every row.
+void compute_outputs(const uint first_row, const uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+
+    const uint nb = p.ncols / QUANT_K;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint l = tid % 16u;
+    const uint bstep = gl_WorkGroupSize.x / 16u;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint i = 0; i < NUM_ROWS; ++i) {
+            temp[j][i] = FLOAT_TYPE(0);
+        }
+    }
+
+    [[unroll]] for (uint jcol = 0; jcol < NUM_COLS; ++jcol) {
+        const uint b_base = jcol * p.batch_stride_b + b_offset;
+        for (uint i = tid / 16u; i < nb; i += bstep) {
+            const uint bi = b_base + i * QUANT_K;
+            vec4 b0, b1, b2, b3;
+            float b0e, b1e, b2e;
+            b0  = vec4(data_b[bi + l], data_b[bi + 32u + l], data_b[bi + 64u + l], data_b[bi + 96u + l]);
+            b0e = float(data_b[bi + 128u + l]);
+            b1  = vec4(data_b[bi + 16u + l], data_b[bi + 48u + l], data_b[bi + 80u + l], data_b[bi + 112u + l]);
+            b1e = float(data_b[bi + 144u + l]);
+            b2  = vec4(data_b[bi + 160u + l], data_b[bi + 176u + l], data_b[bi + 192u + l], data_b[bi + 208u + l]);
+            b2e = float(data_b[bi + 224u + l]);
+            b3  = l < 4u ? vec4(data_b[bi + 240u + l], data_b[bi + 244u + l], data_b[bi + 248u + l], data_b[bi + 252u + l]) : vec4(0);
+
+            for (uint nrow = 0; nrow < num_rows; ++nrow) {
+                const uint ib = a_offset + (first_row + nrow) * nb + i;
+                // 32-bit loads (byte loads are one instruction per byte on AMD); neighbouring lanes share the words
+                const uint sh = (l & 3u) * 8u;
+                const uint v0 = (data_a_packed32[ib].qs[l >> 2] >> sh) & 255u;
+                const uint v1 = (data_a_packed32[ib].qs[4u + (l >> 2)] >> sh) & 255u;
+                const uint v2 = (data_a_packed32[ib].qs[8u + (l >> 2)] >> sh) & 255u;
+                const uint v3 = (data_a_packed32[ib].qs[12] >> sh) & 255u;
+                const uint we = data_a_packed32[ib].e;
+                const vec4 t0 = fpt_lut4[v0];
+                const vec4 t1 = fpt_lut4[v1];
+                const vec4 t2 = fpt_lut4[v2];
+                const vec4 t3 = fpt_lut4[v3];
+
+                // weight groups of 64: plane t of bytes 0..31 is 32t.., of bytes 32..47 is 160+16t.., of qh is 240+4t..
+                const float s0 = t0.x * b0.x + t0.y * b0.y + t1.x * b1.x + t1.y * b1.y;
+                const float s1 = t0.z * b0.z + t0.w * b0.w + t1.z * b1.z + t1.w * b1.w;
+                const float s2 = fpt_lut1[v0] * b0e + fpt_lut1[v1] * b1e + t2.x * b2.x + t2.y * b2.y;
+                const float s3 = t2.z * b2.z + t2.w * b2.w + fpt_lut1[v2] * b2e + dot(t3, b3);
+
+                temp[jcol][nrow] += FLOAT_TYPE(ue4m3_to_fp32(uint8_t(we & 255u)) * s0 + ue4m3_to_fp32(uint8_t((we >> 8) & 255u)) * s1
+                                             + ue4m3_to_fp32(uint8_t((we >> 16) & 255u)) * s2 + ue4m3_to_fp32(uint8_t(we >> 24)) * s3);
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    init_iq_shmem(gl_WorkGroupSize);
+    init_fpt_shmem();
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, min(NUM_ROWS, p.stride_d - first_row));
+    }
+}

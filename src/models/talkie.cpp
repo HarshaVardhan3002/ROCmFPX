@@ -111,8 +111,8 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
         cb(cur, "ffn_norm", il);
 
         cur = build_ffn(cur,
-                model.layers[il].ffn_up,   nullptr, nullptr,
-                model.layers[il].ffn_gate, nullptr, nullptr,
+                model.layers[il].ffn_up,   nullptr, model.layers[il].ffn_up_s,
+                model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
                 model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                 nullptr,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
@@ -139,7 +139,7 @@ llama_model_talkie::graph::graph(const llama_model & model, const llm_graph_para
 
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur);
+    cur = build_lora_mm(model.output, cur, model.output_s);
     cur = ggml_scale(ctx0, cur, hparams.f_logit_scale);
     cb(cur, "result_output", -1);
 

@@ -333,7 +333,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_attention(
     attn = ggml_mul(ctx0, attn, gate);
     cb(attn, "attn_gated", il);
 
-    ggml_tensor * out = build_lora_mm(layer.wo, attn);
+    ggml_tensor * out = build_lora_mm(layer.wo, attn, layer.wo_s);
     cb(out, "attn_out", il);
 
     return out;
@@ -488,7 +488,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_attention_dsa(
     attn = ggml_mul(ctx0, attn, gate);
     cb(attn, "attn_gated", il);
 
-    ggml_tensor * out = build_lora_mm(layer.wo, attn);
+    ggml_tensor * out = build_lora_mm(layer.wo, attn, layer.wo_s);
     cb(out, "attn_out", il);
 
     return out;

@@ -1771,6 +1771,25 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * w_s,
           ggml_tensor * slots) const {
     cur = build_hadamard_input(w, cur);
+
+    // per-expert ".scale" gathered for the selected experts, [1, n_expert_used, n_tokens]; built and expanded
+    // BEFORE the product so the MUL lands right after the MUL_MAT_ID node and a backend can fuse the two
+    // (Vulkan MUL_MAT_ID_MUL: 3 fewer dispatches per scaled expert matrix per token)
+    // node order: input, scale gather, product, scale MUL (expanded in that order so the three are adjacent)
+    ggml_tensor * s = nullptr;
+    if (w_s) {
+        const int64_t n_expert = w_s->ne[0];
+        const int64_t n_tokens = ids->ne[1];
+        ggml_build_forward_expand(gf, cur);
+        s = ggml_reshape_3d(ctx0, w_s, 1, n_expert, 1);
+        // the REPEAT is only redundant for exactly one token (a ubatch can have 0 tokens left after output selection)
+        if (n_tokens != 1) {
+            s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
+        }
+        s = ggml_get_rows(ctx0, s, ids);
+        ggml_build_forward_expand(gf, s);
+    }
+
     // the experts in the MoE cache are selected by their slots
     ggml_tensor * res = slots == nullptr ?
         ggml_mul_mat_id(ctx0, w, cur, ids) :
@@ -1789,13 +1808,10 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
         ggml_prec_set_acc(res, GGML_PREC_F32);
     }
 
-    if (w_s) {
-        const int64_t n_expert = w_s->ne[0];
-        const int64_t n_tokens = cur->ne[2];
-        ggml_tensor * s = ggml_reshape_3d(ctx0, w_s, 1, n_expert, 1);
-        s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-        s = ggml_get_rows(ctx0, s, ids);
+    if (s) {
+        ggml_build_forward_expand(gf, res);
         res = ggml_mul(ctx0, res, s);
+        ggml_build_forward_expand(gf, res);
     }
     for (const auto & lora : *loras) {
         llama_adapter_lora_weight * lw = lora.first->get_weight(w);

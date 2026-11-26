@@ -261,7 +261,11 @@ static int rocmfpx_qmax_log2(ggml_type type) {
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return 4;
         case GGML_TYPE_Q4_0_ROCMI4:       return 3;
         case GGML_TYPE_Q3_0_ROCMFPX:
-        case GGML_TYPE_Q2_0_ROCMFPX:      return 2;
+        case GGML_TYPE_Q2_0_ROCMFPX:
+        case GGML_TYPE_Q2_0_ROCMFPL:      return 2;
+        case GGML_TYPE_Q1_0_ROCMFPT:      return 0;
+        case GGML_TYPE_ROCMIQ2_XXS:       return 3;
+        case GGML_TYPE_ROCMIQ1_S:         return 2;
         default:                          return -1;
     }
 }
@@ -426,9 +430,21 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 
     quantize &= params->quantize_output_tensor || name != "output.weight";
 
-    // do not quantize expert gating tensors
+    // do not quantize expert gating tensors, unless a tensor type override names them with F16/BF16
+    // (an F32 router is read in full for every token: 2 MiB per layer on a 256-expert, 2048-wide model)
     // NOTE: can't use LLM_TN here because the layer number is not known
-    quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;
+    if (name.find("ffn_gate_inp.weight") != std::string::npos) {
+        bool half_router = false;
+        if (params->tt_overrides) {
+            for (const auto * p = params->tt_overrides; p->pattern != nullptr; p++) {
+                if (std::string(p->pattern).find("ffn_gate_inp") != std::string::npos &&
+                    (p->type == GGML_TYPE_F16 || p->type == GGML_TYPE_BF16)) {
+                    half_router = true;
+                }
+            }
+        }
+        quantize &= half_router;
+    }
 
     // sensenova-loop mHC routers stay F32 (the reference keeps them in FP32)
     quantize &= name.find(".mhc_") == std::string::npos;
@@ -570,6 +586,10 @@ static ggml_type tensor_type_fallback(quantize_state_impl & qs, const ggml_tenso
             case GGML_TYPE_Q6_0_ROCMFPX:
             case GGML_TYPE_Q8_0_ROCMFPX: return_type = GGML_TYPE_Q8_0; break;
             case GGML_TYPE_Q4_0_ROCMI4: return_type = GGML_TYPE_Q4_0; break;
+            case GGML_TYPE_Q2_0_ROCMFPL:
+            case GGML_TYPE_Q1_0_ROCMFPT:
+            case GGML_TYPE_ROCMIQ2_XXS:
+            case GGML_TYPE_ROCMIQ1_S:    return_type = GGML_TYPE_Q2_0_ROCMFPX; break;
             case GGML_TYPE_Q4_K:    return_type = GGML_TYPE_Q5_0;   break;
             case GGML_TYPE_Q5_K:    return_type = GGML_TYPE_Q5_1;   break;
             case GGML_TYPE_Q6_K:    return_type = GGML_TYPE_Q8_0;   break;
@@ -876,6 +896,30 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             } else {
                 if (ftype == LLAMA_FTYPE_MOSTLY_IQ1_S || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) new_type = GGML_TYPE_IQ2_XXS;
                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M) new_type = GGML_TYPE_IQ3_S;
+            }
+        }
+    } else if (ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ1_S) {
+        // same protection as the stock IQ2_XXS / IQ1_S mixes, with ROCmFPX types for the promoted tensors
+        const bool iq1 = ftype == LLAMA_FTYPE_MOSTLY_ROCMIQ1_S;
+        if (category_is_attn_v(category)) {
+            if (qs.model.hparams.n_gqa() >= 4 || qs.model.hparams.n_expert >= 4) new_type = GGML_TYPE_Q4_0_ROCMFP4;
+            else new_type = iq1 ? GGML_TYPE_ROCMIQ2_XXS : GGML_TYPE_Q3_0_ROCMFPX;
+            ++qs.i_attention_wv;
+        }
+        else if (qs.model.hparams.n_expert == 8 && category == tensor_category::ATTENTION_K) {
+            new_type = GGML_TYPE_Q4_0_ROCMFP4;
+        }
+        else if (category == tensor_category::FFN_DOWN) {
+            if (qs.i_ffn_down < qs.n_ffn_down/8) {
+                new_type = iq1 ? GGML_TYPE_ROCMIQ2_XXS : GGML_TYPE_Q3_0_ROCMFPX;
+            }
+            ++qs.i_ffn_down;
+        }
+        else if (category == tensor_category::ATTENTION_OUTPUT) {
+            if (qs.model.hparams.n_expert == 8) {
+                new_type = GGML_TYPE_Q4_0_ROCMFP4;
+            } else if (iq1) {
+                new_type = GGML_TYPE_ROCMIQ2_XXS;
             }
         }
     } else if (category_is_attn_v(category)) {
@@ -1414,6 +1458,10 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q4_0_ROCMFP4_STRIX_LEAN: return GGML_TYPE_Q4_0_ROCMFP4_FAST;
         case LLAMA_FTYPE_MOSTLY_Q3_0_ROCMFPX: return GGML_TYPE_Q3_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPX: return GGML_TYPE_Q2_0_ROCMFPX;
+        case LLAMA_FTYPE_MOSTLY_Q2_0_ROCMFPL: return GGML_TYPE_Q2_0_ROCMFPL;
+        case LLAMA_FTYPE_MOSTLY_Q1_0_ROCMFPT: return GGML_TYPE_Q1_0_ROCMFPT;
+        case LLAMA_FTYPE_MOSTLY_ROCMIQ2_XXS:  return GGML_TYPE_ROCMIQ2_XXS;
+        case LLAMA_FTYPE_MOSTLY_ROCMIQ1_S:    return GGML_TYPE_ROCMIQ1_S;
         case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX: return GGML_TYPE_Q6_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q6_0_ROCMFPX_LEAN: return GGML_TYPE_Q6_0_ROCMFPX;
         case LLAMA_FTYPE_MOSTLY_Q8_0_ROCMFPX: return GGML_TYPE_Q8_0_ROCMFPX;

@@ -109,7 +109,7 @@ ggml_tensor * llama_model_hrm_text::graph::build_stack(llm_graph_input_attn_kv *
 
         // sigmoid-gated self-attention (same shape as qwen3next attention layers)
         {
-            ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, cur);
+            ggml_tensor * gate = build_lora_mm(layer.wqkv_gate, cur, layer.wqkv_gate_s);
             cb(gate, "attn_gate_proj", s);
 
             auto [Qcur, Kcur, Vcur] = build_qkv(layer, cur, n_embd_head_k, n_head, n_head_kv, s);
@@ -145,9 +145,9 @@ ggml_tensor * llama_model_hrm_text::graph::build_stack(llm_graph_input_attn_kv *
         cb(cur, "ffn_norm", s);
 
         cur = build_ffn(cur,
-            layer.ffn_up, nullptr, nullptr,
-            layer.ffn_gate, nullptr, nullptr,
-            layer.ffn_down, nullptr, nullptr,
+            layer.ffn_up, nullptr, layer.ffn_up_s,
+            layer.ffn_gate, nullptr, layer.ffn_gate_s,
+            layer.ffn_down, nullptr, layer.ffn_down_s,
             nullptr,
             LLM_FFN_SILU, LLM_FFN_PAR, s);
         cb(cur, "ffn_out", s);

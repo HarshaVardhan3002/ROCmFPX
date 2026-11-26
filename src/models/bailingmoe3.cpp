@@ -367,9 +367,9 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
 
         if ((uint32_t) il < hparams.n_layer_dense_lead) {
             cur = build_ffn(cur,
-                    layer.ffn_up, nullptr, nullptr,
-                    layer.ffn_gate, nullptr, nullptr,
-                    layer.ffn_down, nullptr, nullptr,
+                    layer.ffn_up, nullptr, layer.ffn_up_s,
+                    layer.ffn_gate, nullptr, layer.ffn_gate_s,
+                    layer.ffn_down, nullptr, layer.ffn_down_s,
                     nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
         } else {
             ggml_tensor * moe = build_moe_ffn(cur,
@@ -385,9 +385,9 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
                     (llama_expert_gating_func_type) hparams.expert_gating_func,
                     il);
             ggml_tensor * shared = build_ffn(cur,
-                    layer.ffn_up_shexp, nullptr, nullptr,
-                    layer.ffn_gate_shexp, nullptr, nullptr,
-                    layer.ffn_down_shexp, nullptr, nullptr,
+                    layer.ffn_up_shexp, nullptr, layer.ffn_up_shexp_s,
+                    layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+                    layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
                     nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
             cur = ggml_add(ctx0, moe, shared);
         }
@@ -539,9 +539,9 @@ llama_model_bailingmoe3::graph_mtp::graph_mtp(const llama_model & model, const l
             (llama_expert_gating_func_type) hparams.expert_gating_func,
             il);
     ggml_tensor * shared = build_ffn(cur,
-            layer.ffn_up_shexp, nullptr, nullptr,
-            layer.ffn_gate_shexp, nullptr, nullptr,
-            layer.ffn_down_shexp, nullptr, nullptr,
+            layer.ffn_up_shexp, nullptr, layer.ffn_up_shexp_s,
+            layer.ffn_gate_shexp, nullptr, layer.ffn_gate_shexp_s,
+            layer.ffn_down_shexp, nullptr, layer.ffn_down_shexp_s,
             nullptr, LLM_FFN_SILU, LLM_FFN_PAR, il);
     cur = ggml_add(ctx0, moe, shared);
     cur = ggml_add(ctx0, cur, ffn_inp);
