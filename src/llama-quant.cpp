@@ -278,6 +278,8 @@ static bool rocmfpx_tensor_scale_supported(const std::string & name, llm_arch ar
     }
     // gated delta net projections: only these graphs pass the ".scale" of these weights to build_lora_mm
     static const std::regex pattern_gdn(R"(^blk\.\d+\.(attn_gate|ssm_(out|alpha|beta))\.weight$)");
+    // hy_v4_flash: MLA low-rank projections, attention gate, latent MoE projections, Engram key/value
+    static const std::regex pattern_hy4(R"(^blk\.\d+\.(attn_(q_a|q_b|kv_a_mqa|gate)|ffn_routed_(up|down)|engram_kv)\.weight$)");
     switch (arch) {
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_SENSENOVA_LOOP:
@@ -286,6 +288,8 @@ static bool rocmfpx_tensor_scale_supported(const std::string & name, llm_arch ar
         case LLM_ARCH_CLOVER_MOE:
         case LLM_ARCH_QWEN4EXP:
             return std::regex_match(name, pattern_gdn);
+        case LLM_ARCH_HY_V4_FLASH:
+            return std::regex_match(name, pattern_hy4);
         default:
             return false;
     }
@@ -454,6 +458,13 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 
     // Engram gate is an elementwise weight (ggml_mul), not a matmul operand
     quantize &= name.find("engram_gate.weight") == std::string::npos;
+
+    // hy_v4_flash: these are ggml_add operands
+    if (arch == LLM_ARCH_HY_V4_FLASH) {
+        quantize &= name.find("engram_kv_b.weight")            == std::string::npos;
+        quantize &= name.find("engram_hc_scale.weight")        == std::string::npos;
+        quantize &= name.find("indexer_compressor_ape.weight") == std::string::npos;
+    }
 
     // these are very small (e.g. 4x4)
     quantize &= name.find("altup")  == std::string::npos;

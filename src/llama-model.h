@@ -628,6 +628,13 @@ struct llama_layer {
     struct ggml_tensor * ffn_routed_down = nullptr; // latent MoE: n_embd -> n_expert_latent
     struct ggml_tensor * ffn_routed_up   = nullptr; // latent MoE: n_expert_latent -> n_embd
     struct ggml_tensor * ffn_routed_norm = nullptr;
+    // hy_v4_flash: ".scale" of projections the generic scale pass does not load
+    struct ggml_tensor * ffn_routed_down_s = nullptr;
+    struct ggml_tensor * ffn_routed_up_s   = nullptr;
+    struct ggml_tensor * wq_a_s            = nullptr;
+    struct ggml_tensor * wq_b_s            = nullptr;
+    struct ggml_tensor * wkv_a_mqa_s       = nullptr;
+    struct ggml_tensor * engram_kv_s       = nullptr;
 
     // DSA (deepseek sparse attention)
     struct ggml_tensor * indexer_k_norm   = nullptr;
@@ -639,10 +646,20 @@ struct llama_layer {
     // glm5-next k-pool indexer
     struct ggml_tensor * indexer_kpool_gate = nullptr;
     struct ggml_tensor * indexer_kpool_ape  = nullptr;
+    // hy_v4_flash: the pool runs over a projection of the normed key, and the pooled result is
+    // normed again before it is scored
+    struct ggml_tensor * indexer_kpool_value = nullptr;
+    struct ggml_tensor * indexer_kpool_norm  = nullptr;
 
     // deepseek41
     struct ggml_tensor * engram_kv   = nullptr;
     struct ggml_tensor * engram_gate = nullptr; // q_weight*k_weight folded
+    // hy_v4_flash only: biases on engram_kv, the per-head norm of the looked-up rows, and the
+    // scale/offset of the delta the module writes back
+    struct ggml_tensor * engram_kv_b        = nullptr;
+    struct ggml_tensor * engram_lookup_norm = nullptr;
+    struct ggml_tensor * engram_pre_gamma   = nullptr;
+    struct ggml_tensor * engram_hc_scale    = nullptr;
 
     // MSA
     struct ggml_tensor * index_q_proj = nullptr;
@@ -770,6 +787,11 @@ struct llama_model {
     // for classifier models
     std::vector<std::string> classifier_labels;
     std::vector<std::string> decision_labels;
+
+    // deepseek41 Engram: token id -> id of its normalized form, hashed into the n-grams
+    std::vector<int32_t> engram_token_map;
+    // hy_v4_flash Engram: n_modules*ngram_size hash multipliers, more than hparams.ple_layer_multipliers holds
+    std::vector<uint64_t> engram_multipliers;
 
     struct ggml_tensor * tok_embd   = nullptr;
     struct ggml_tensor * type_embd  = nullptr;

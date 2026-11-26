@@ -283,7 +283,11 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         std::vector<uint32_t> n_head_per_layer;
         n_head_per_layer.reserve(n_layer);
         for (uint32_t il = 0; il < n_layer; il++) {
-            n_head_per_layer.push_back(il == 1 ? 0 : n_head);
+            // hy_v4_flash has no recurrent layer: the odd layers are sliding-window and
+            // carry twice the heads over the same latent geometry
+            n_head_per_layer.push_back(arch == LLM_ARCH_HY_V4_FLASH
+                    ? (il % 2 ? 2*n_head : n_head)
+                    : (il == 1 ? 0 : n_head));
         }
         // GLM5 next KDA heads come from the uniform head count, only head_count_kv is per layer.
         if (arch == LLM_ARCH_GLM5_NEXT) {
@@ -454,6 +458,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     // summing to n_rot / 2 (n_rot is 64 in this fixture)
     if (arch == LLM_ARCH_BAILINGMOE3) {
         ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({8, 12, 12, 0}));
+    } else if (arch == LLM_ARCH_HY_V4) {
+        // text-only hy_v4 files carry no sections, keep the normal rope path
+        ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({0, 0, 0, 0}));
     } else {
         ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
     }
@@ -551,7 +558,9 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     if (moe) {
         ms.add_kv(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, n_ff);
         ms.add_kv(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, n_ff / 2);  // distinct from n_ff so a saver key-clobber surfaces on reload
-        ms.add_kv(LLM_KV_EXPERT_LATENT_LENGTH,       n_ff);
+        // keep the latent width distinct from n_ff_exp, or a transposed routed_down / routed_up
+        // would still load and the orientation would go untested
+        ms.add_kv(LLM_KV_EXPERT_LATENT_LENGTH,       arch == LLM_ARCH_HY_V4_FLASH ? uint32_t(64) : n_ff);
         ms.add_kv(LLM_KV_INTERLEAVE_MOE_LAYER_STEP,  uint32_t(2));
         // with more experts than a ubatch uses, the copy of the used experts in host memory skips some of them
         ms.add_kv(LLM_KV_EXPERT_COUNT,               uint32_t(host_experts_test(arch) ? 64 : 2));
@@ -842,6 +851,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_HUNYUAN_MOE:
         case LLM_ARCH_HY_V3:
         case LLM_ARCH_HY_V4:
+        case LLM_ARCH_HY_V4_FLASH:
         case LLM_ARCH_OPENAI_MOE:
         case LLM_ARCH_LFM2MOE:
         case LLM_ARCH_SMALLTHINKER:
@@ -932,7 +942,7 @@ static bool arch_supported(const llm_arch arch) {
     // FIXME: these hit scheduler/view-backed-output issues with WebGPU on CI.
 #ifdef GGML_USE_WEBGPU
     if (arch == LLM_ARCH_DEEPSEEK32 || arch == LLM_ARCH_GLM_DSA || arch == LLM_ARCH_DOTS3NOTE || arch == LLM_ARCH_QWEN4EXP ||
-            arch == LLM_ARCH_HY_V4) {
+            arch == LLM_ARCH_HY_V4 || arch == LLM_ARCH_HY_V4_FLASH) {
         return false;
     }
 #endif // GGML_USE_WEBGPU
