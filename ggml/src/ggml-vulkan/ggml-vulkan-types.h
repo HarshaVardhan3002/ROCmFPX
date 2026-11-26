@@ -1101,6 +1101,9 @@ typedef std::vector<vk_submission> vk_sequence;
 
 #define MAT_VEC_FUSION_FLAGS_SCALE1 0x8
 
+// MUL_MAT_ID: fuse0 is the raw per-expert scale [n_expert], read at the selected expert id (GET_ROWS elided)
+#define MAT_VEC_FUSION_FLAGS_SCALE0_BYID 0x10
+
 struct vk_staging_memcpy {
     vk_staging_memcpy(void * _dst, const void * _src, size_t _n) : dst(_dst), src(_src), n(_n) {}
 
@@ -1286,6 +1289,8 @@ struct ggml_backend_vk_context {
     // QSA indexer gather+add+top_k fused into one radix-select
     bool fused_topk_qsa {};
     bool fused_hc_post_gate {};
+    // GET_ROWS(per-expert scale) + MUL_MAT_ID + MUL: the gather is elided, the shader reads the scale by expert id
+    bool fused_mmid_scale_byid {};
     rms_norm_mode fused_rms_norm_mode {RMS_NORM_COUNT};
 
     // for GGML_VK_PERF_LOGGER

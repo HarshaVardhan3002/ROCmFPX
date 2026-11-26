@@ -430,9 +430,21 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
 
     quantize &= params->quantize_output_tensor || name != "output.weight";
 
-    // do not quantize expert gating tensors
+    // do not quantize expert gating tensors, unless a tensor type override names them with F16/BF16
+    // (an F32 router is read in full for every token: 2 MiB per layer on a 256-expert, 2048-wide model)
     // NOTE: can't use LLM_TN here because the layer number is not known
-    quantize &= name.find("ffn_gate_inp.weight") == std::string::npos;
+    if (name.find("ffn_gate_inp.weight") != std::string::npos) {
+        bool half_router = false;
+        if (params->tt_overrides) {
+            for (const auto * p = params->tt_overrides; p->pattern != nullptr; p++) {
+                if (std::string(p->pattern).find("ffn_gate_inp") != std::string::npos &&
+                    (p->type == GGML_TYPE_F16 || p->type == GGML_TYPE_BF16)) {
+                    half_router = true;
+                }
+            }
+        }
+        quantize &= half_router;
+    }
 
     // sensenova-loop mHC routers stay F32 (the reference keeps them in FP32)
     quantize &= name.find(".mhc_") == std::string::npos;

@@ -12596,6 +12596,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 512, 8, false, 4096, 1, 1280));
     }
 
+    // T0 (Strix trunk recipe): token generation mat-vec on the Qwen3.6-35B-A3B trunk shapes (m out, k in)
+    for (ggml_type type_a : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q5_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
+                             GGML_TYPE_Q6_K, GGML_TYPE_IQ4_XS, GGML_TYPE_IQ4_NL, GGML_TYPE_Q3_K, GGML_TYPE_IQ3_S, GGML_TYPE_F16}) {
+        for (auto mk : std::vector<std::array<int64_t, 2>>{{8192, 2048}, {4096, 2048}, {2048, 4096}, {512, 2048}, {2048, 512}, {248320, 2048}}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk[0], 1, mk[1], {1, 1}, {1, 1}));
+        }
+    }
+
+    // T1 (Strix expert recipe): Qwen3.6-35B-A3B expert shapes, 256 experts, 8 used, one token
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_Q2_K,
+                             GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_Q3_K, GGML_TYPE_IQ4_XS, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K,
+                             GGML_TYPE_IQ1_S, GGML_TYPE_ROCMIQ1_S, GGML_TYPE_Q2_0_ROCMFPX}) {
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 2048, 1, 512));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 512, 1, 2048));
+    }
+
     // DeepSeek-V4.1 prompt processing at depth: raw window (128 + ubatch, padded to 768) + n_comp compressed rows,
     // 64 heads sharing one 512-wide K=V head, 512 queries per ubatch; the indexer (32 heads) picks the top 512 rows
     for (int64_t n_comp : {4096, 8192, 16384, 32768, 65536}) {

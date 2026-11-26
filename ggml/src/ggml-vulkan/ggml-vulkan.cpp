@@ -8103,7 +8103,9 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
         ggml_pipeline_request_descriptor_sets(ctx, dmmv, nei1);
     }
 
-    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + ctx->num_additional_fused_ops]);
+    // with an elided scale GET_ROWS in front, node_idx is the MUL_MAT_ID and only the MUL follows it
+    const int n_fused_after = (int) ctx->num_additional_fused_ops - (ctx->fused_mmid_scale_byid ? 1 : 0);
+    vk_subbuffer d_D = ggml_vk_tensor_subbuffer(ctx, cgraph->nodes[node_idx + n_fused_after]);
     vk_subbuffer d_Qx = ggml_vk_tensor_subbuffer(ctx, src0);
     vk_subbuffer d_Qy = ggml_vk_tensor_subbuffer(ctx, src1);
     vk_subbuffer d_ids = ggml_vk_tensor_subbuffer(ctx, ids);
@@ -8178,12 +8180,20 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
 
     uint32_t fusion_flags = 0;
 
-    if (ctx->num_additional_fused_ops > 0) {
+    if (n_fused_after > 0) {
         const ggml_tensor * bias = cgraph->nodes[node_idx + 1]->src[1];
 
-        d_F0 = ggml_vk_tensor_subbuffer(ctx, bias);
+        if (ctx->fused_mmid_scale_byid) {
+            // bias is the elided GET_ROWS; bind its source, the per-expert scale [1, n_expert, 1]
+            d_F0 = ggml_vk_tensor_subbuffer(ctx, bias->src[0]);
+            fusion_flags |= MAT_VEC_FUSION_FLAGS_SCALE0_BYID;
+        } else {
+            d_F0 = ggml_vk_tensor_subbuffer(ctx, bias);
+        }
 
-        if (cgraph->nodes[node_idx + 1]->op == GGML_OP_MUL) {
+        if (ctx->fused_mmid_scale_byid) {
+            // flag set above
+        } else if (cgraph->nodes[node_idx + 1]->op == GGML_OP_MUL) {
             fusion_flags |= MAT_VEC_FUSION_FLAGS_SCALE0;
         } else {
             GGML_ASSERT(cgraph->nodes[node_idx + 1]->op == GGML_OP_ADD_ID);
@@ -8192,7 +8202,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     }
 
     vk_subbuffer d_F1 = d_D;
-    if (ctx->num_additional_fused_ops > 1) {
+    if (n_fused_after > 1) {
         const ggml_tensor * scale = cgraph->nodes[node_idx + 2]->src[1];
 
         d_F1 = ggml_vk_tensor_subbuffer(ctx, scale);
@@ -12738,7 +12748,9 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
 
         break;
     case GGML_OP_GET_ROWS:
-        if (ctx->fused_topk_qsa) {
+        if (ctx->fused_mmid_scale_byid) {
+            ggml_vk_mul_mat_id(ctx, compute_ctx, cgraph, node_idx + 1);
+        } else if (ctx->fused_topk_qsa) {
             ggml_vk_topk_qsa(ctx, compute_ctx, cgraph, node_idx);
         } else {
             ggml_vk_get_rows(ctx, compute_ctx, src0, src1, node);
@@ -14107,6 +14119,48 @@ bool ggml_vk_can_fuse(const ggml_backend_vk_context * ctx, const struct ggml_cgr
     return true;
 }
 
+// GET_ROWS + MUL_MAT_ID + MUL where the GET_ROWS gathers a per-expert scale [1, n_expert, 1] by the same ids
+// as the MUL_MAT_ID (one token): the mat-vec shader reads the scale at the expert id, the gather is not run
+static bool ggml_vk_can_fuse_scale_gather_mmid_mul(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int i) {
+    if (i + 2 >= cgraph->n_nodes) {
+        return false;
+    }
+    const ggml_tensor * gr   = cgraph->nodes[i];
+    const ggml_tensor * mmid = cgraph->nodes[i + 1];
+    const ggml_tensor * mul  = cgraph->nodes[i + 2];
+    if (gr->op != GGML_OP_GET_ROWS || mmid->op != GGML_OP_MUL_MAT_ID || mul->op != GGML_OP_MUL) {
+        return false;
+    }
+    for (const ggml_tensor * n : { gr, mmid, mul }) {
+        if ((n->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+            return false;
+        }
+    }
+    if (mul->src[0] != mmid || mul->src[1] != gr || gr->src[1] != mmid->src[2]) {
+        return false;
+    }
+    if (!ggml_node_has_n_uses(cgraph, i, 1) || !ggml_node_has_n_uses(cgraph, i + 1, 1)) {
+        return false;
+    }
+    if ((gr->flags & GGML_TENSOR_FLAG_OUTPUT) || (mmid->flags & GGML_TENSOR_FLAG_OUTPUT)) {
+        return false;
+    }
+    if (!ggml_vk_use_mul_mat_vec_id(cgraph, i + 1)) {
+        return false;
+    }
+    const ggml_tensor * s = gr->src[0];
+    if (s->type != GGML_TYPE_F32 || mmid->type != GGML_TYPE_F32 || !ggml_is_contiguous(s) ||
+        s->ne[0] != 1 || s->ne[1] != mmid->src[0]->ne[2] || s->ne[2] != 1 || s->ne[3] != 1 ||
+        get_misalign_bytes(ctx, s) != 0) {
+        return false;
+    }
+    // one token: the gathered scale is [1, n_expert_used, 1]
+    if (gr->ne[0] != 1 || gr->ne[1] != mmid->ne[1] || gr->ne[2] != 1 || mmid->ne[2] != 1) {
+        return false;
+    }
+    return true;
+}
+
 bool ggml_vk_can_fuse_ssm_conv(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph,
                                       int node_idx, int num_extra) {
     const ggml_tensor * conv = cgraph->nodes[node_idx];
@@ -14759,6 +14813,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         ctx->fused_topk_moe_scale = false;
         ctx->fused_topk_qsa = false;
         ctx->fused_hc_post_gate = false;
+        ctx->fused_mmid_scale_byid = false;
         ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
         const char *fusion_string {};
         if (!ctx->device->disable_fusion) {
@@ -14789,6 +14844,13 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 fusion_string = "MUL_MAT_MUL";
                 op_srcs_fused_elementwise[0] = false;
                 op_srcs_fused_elementwise[1] = true;
+            } else if (ggml_vk_can_fuse_scale_gather_mmid_mul(ctx, cgraph, i)) {
+                ctx->num_additional_fused_ops = 2;
+                ctx->fused_mmid_scale_byid = true;
+                fusion_string = "GET_ROWS_MUL_MAT_ID_MUL";
+                op_srcs_fused_elementwise[0] = false;
+                op_srcs_fused_elementwise[1] = false;
+                op_srcs_fused_elementwise[2] = true;
             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT_ID, GGML_OP_ADD_ID, GGML_OP_MUL })) {
                 ctx->num_additional_fused_ops = 2;
                 fusion_string = "MUL_MAT_ID_ADD_ID_MUL";
@@ -15012,6 +15074,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
                 ctx->fused_topk_moe_scale = false;
                 ctx->fused_topk_qsa = false;
                 ctx->fused_hc_post_gate = false;
+                ctx->fused_mmid_scale_byid = false;
                 ctx->fused_rms_norm_mode = RMS_NORM_COUNT;
                 fusion_string = nullptr;
             }
@@ -15231,6 +15294,15 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
             return keep_pattern(pattern);
         };
 
+        static const std::initializer_list<ggml_op> scale_gather_mmid_mul_pattern = { GGML_OP_GET_ROWS, GGML_OP_MUL_MAT_ID, GGML_OP_MUL };
+        auto const &is_scale_gather_mmid_mul = [&](int n) -> bool {
+            if (!match_pattern(scale_gather_mmid_mul_pattern, n)) {
+                return false;
+            }
+            const ggml_tensor * gr = graph->nodes[n], * mmid = graph->nodes[n + 1], * mul = graph->nodes[n + 2];
+            return mul->src[0] == mmid && mul->src[1] == gr && gr->src[1] == mmid->src[2];
+        };
+
         if (keep_topk_moe_pattern(topk_moe_early_softmax_norm)) {
             continue;
         }
@@ -15273,6 +15345,11 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
             keep_pattern(hc_post_gate_pattern);
             continue;
         }
+        // per-expert scale gather + MUL_MAT_ID + MUL stays together (the gather is elided by the fusion)
+        if (is_scale_gather_mmid_mul(first_unused)) {
+            keep_pattern(scale_gather_mmid_mul_pattern);
+            continue;
+        }
 
         // First, grab the next unused node.
         current_set.push_back(first_unused);
@@ -15313,11 +15390,23 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
                 match_pattern(rms_norm_mul_rope_view_set_rows_pattern, j) ||
                 match_pattern(rms_norm_view_set_rows_pattern, j) ||
                 match_pattern(rope_view_set_rows_pattern, j) ||
-                match_pattern(hc_post_gate_pattern, j)) {
+                match_pattern(hc_post_gate_pattern, j) ||
+                is_scale_gather_mmid_mul(j) || (j >= 1 && is_scale_gather_mmid_mul(j - 1)) || (j >= 2 && is_scale_gather_mmid_mul(j - 2))) {
                 continue;
             }
+            // MUL_MAT_ID + MUL (per-expert scale): the scale gather may already sit earlier in this set;
+            // barriers are inserted from the hazard tracking, so keep the pair adjacent for the fusion
+            const bool mmid_mul_pair = j == current_set.back() + 1 &&
+                graph->nodes[j]->op == GGML_OP_MUL && graph->nodes[j-1]->op == GGML_OP_MUL_MAT_ID &&
+                graph->nodes[j]->src[0] == graph->nodes[j-1];
+            auto const &in_current_set = [&](int c) -> bool {
+                return std::find(current_set.begin(), current_set.end(), c) != current_set.end();
+            };
             bool ok = true;
             for (int c = first_unused; c < j; ++c) {
+                if (mmid_mul_pair && in_current_set(c)) {
+                    continue;
+                }
                 if (!used[c] &&
                     is_src_of(graph->nodes[j], graph->nodes[c]) &&
                     !(c == current_set.back() && graph->nodes[c]->op == GGML_OP_RMS_NORM && graph->nodes[j]->op == GGML_OP_MUL && empty_or_scheduled_between(c+1, j)) &&
