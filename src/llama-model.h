@@ -616,6 +616,10 @@ struct llama_layer {
     struct ggml_tensor * attn_v_in_norm   = nullptr;
     struct ggml_tensor * attn_res_q       = nullptr; // [n_embd] or [n_embd, 3]
     struct ggml_tensor * ffn_res_q        = nullptr; // [n_embd]
+    // inkling2 looped core (later passes): message gates for q, k, v and ffn, stacked on dim 2
+    struct ggml_tensor * loop_gate_down   = nullptr; // [2*n_embd, rank, 4]
+    struct ggml_tensor * loop_gate_forget = nullptr; // [rank, n_embd, 4]
+    struct ggml_tensor * loop_gate_msg    = nullptr; // [rank, n_embd, 4]
 
     // kimi-k3
     struct ggml_tensor * ssm_g           = nullptr; // full-rank KDA gate (replaces ssm_g_a/ssm_g_b)
@@ -776,6 +780,7 @@ struct llama_model {
     struct ggml_tensor * output_norm     = nullptr;
     struct ggml_tensor * output_res_score = nullptr; // kimi-k3: final cross-layer residual mix
     struct ggml_tensor * output_res_q     = nullptr; // inkling2: final block attention residual query
+    struct ggml_tensor * loop_msg_q       = nullptr; // inkling2 loop: message queries [n_embd, 4, n_loop_layers]
     struct ggml_tensor * output_norm_b   = nullptr;
     struct ggml_tensor * output          = nullptr;
     struct ggml_tensor * output_b        = nullptr;
