@@ -46,6 +46,7 @@ def decode(b, rows, cols):
         ql, qh = bb[:, :, 2:34], bb[:, :, 34:50]
         i = np.arange(64)
         ci = ((ql[:, :, i // 2] >> (4 * (i % 2))) & 15) | (((qh[:, :, i // 4] >> (2 * (i % 4))) & 3) << 4)
+        assert cb is not None
         q = cb[ci].reshape(rows, nb, 4, 64)
         div = 0.03125
     sub = UE[scw & 0xFF][..., None] * KF[(scw[..., None] >> (8 + 2 * np.arange(4))) & 3]   # (rows, nb, 4)

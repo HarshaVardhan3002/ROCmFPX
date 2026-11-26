@@ -252,7 +252,7 @@ def load_lora(path: Path, scale: float) -> tuple[dict, float]:
 
 
 def build_plan(src: Source, cfg: dict, mxfp8_mode: str, nvfp4_mode: str = "native", all_f32: bool = False,
-               lora: dict | None = None, lora_scale: float = 1.0) -> list[Item]:
+               lora: dict | None = None, lora_scale: float = 1.0) -> Plan:
     P = "model.llm."
     plan: Plan = Plan()
     V = cfg["vocab"]
@@ -484,6 +484,7 @@ def build_plan(src: Source, cfg: dict, mxfp8_mode: str, nvfp4_mode: str = "nativ
                 def produce(base=produce, lname=lname):
                     x = base()
                     d = lora_delta(lname)
+                    assert d is not None
                     assert d.shape == x.shape, (lname, d.shape, x.shape)
                     x += d.astype(np.float32)
                     return x

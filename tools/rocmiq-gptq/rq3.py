@@ -12,6 +12,8 @@ python -I rq.py --gguf-py DIR --hf MODEL_DIR --f16 F16.gguf --template TEMPLATE.
 import argparse, json, math, sys, time
 from pathlib import Path
 
+from typing import Any, cast
+
 import numpy as np
 import torch
 
@@ -24,7 +26,7 @@ def ue4m3_table():
                 t.append((8 + m) * 2.0 ** (e - 11))
     return torch.tensor(t, dtype=torch.float32)
 
-UE = None  # set on device in main
+UE: torch.Tensor = torch.empty(0)  # set on device in main
 
 # ---------------------------------------------------------------- code rounding, exactly as the C++ encoders
 def dec_s40(x, s):            # x, s broadcastable; returns reconstructed value
@@ -68,7 +70,7 @@ BLOCK = {"S40": (16, dec_s40, 4.0, 2), "FP3": (16, dec_fp3, 4.0, 2), "I4": (32, 
          "T64": (64, dec_t, 1.0, 0), "T128": (128, dec_t, 1.0, 0)}
 BPW = {"S40": 2.5, "FP3": 3.5, "I4": 4.25, "S40G32": 2.25, "S40G64": 2.125, "S30G32": 2.25, "T64": 1.75, "T128": 1.6875}
 
-WINDOW = None    # (below, above): restrict the exhaustive search to scale indices around nearest(max/qmax)
+WINDOW: tuple[int, int] | None = None    # (below, above): restrict the exhaustive search to scale indices around nearest(max/qmax)
 SEARCH = "cpp"   # "cpp": replay the C++ search order incl. its clip pruning; "exhaustive": true argmin
 
 def nearest_e(target):
@@ -263,7 +265,7 @@ def gptq(W, H, qfun_group, g, blocksize=128, damp=0.01, vd=1):
         Hinv = torch.linalg.cholesky(Hinv, upper=True)
     blocksize = max(blocksize, g)
     Q = torch.zeros_like(W)
-    rq = None
+    rq: Any = None
     for i1 in range(0, cols, blocksize):
         i2 = min(i1 + blocksize, cols)
         W1 = W[:, i1:i2].clone()
@@ -412,7 +414,7 @@ def iq2_code_shift(x, w, G, s, delta):
         o = (s * delta * b)[:, None]
         q = iq2_code(x - o, w, G, s) + o
         e = (w * (x - q) ** 2).sum(1)
-        if best is None:
+        if best is None or be is None:
             best, be = q, e
         else:
             m = e < be
@@ -551,7 +553,7 @@ def iq2_scales(xg, wg, G):
         s = d[:, None] * (0.5 + ls) / 4.0
         s8 = s[:, :, None].expand(rows, 8, 4).reshape(-1, 1)
         e = vq_minerr(A, B, Qd, s8).reshape(rows, -1).sum(1)
-        if best_e is None:
+        if best_s is None or best_e is None:
             best_s, best_e = s, e
         else:
             m = e < best_e
@@ -570,7 +572,7 @@ def quant_vq(W, H, qw, fmt):
 
     def qfun_group(xg, c):
         wts = qw[c:c + 256][None, :] * torch.sqrt(sigma2 + xg * xg)
-        neg = None
+        neg: Any = None
         if word == "w16":
             s = w16_scales(xg, wts, C, dim)                  # (rows, 4) per 64
             sub = 64
@@ -734,7 +736,7 @@ def main():
     results, reals = {}, {}
     assert not (args.real and args.transform != 'none'), 'real files only without online transform'
     if need_h:
-        model = AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16).to(dev).eval()
+        model = cast(Any, AutoModelForCausalLM.from_pretrained(args.hf, dtype=torch.bfloat16)).to(dev).eval()
         layers = model.model.layers
         # catch layer-0 inputs
         inps, kw = [], {}
