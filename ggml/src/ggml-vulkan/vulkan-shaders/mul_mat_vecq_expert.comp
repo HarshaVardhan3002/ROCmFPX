@@ -1,0 +1,296 @@
+#version 450
+
+// Expert mat-vec with int8 dot products for short MoE rows (one token, MUL_MAT_ID), ROCmIQ2_XXS and IQ3_XXS.
+//
+// Each lane owns one 64-weight group of a row (one sub scale of ROCmIQ2, two 32-weight sub blocks of IQ3_XXS,
+// half a block_q8_1_x4 of the activations), so its activations stay in registers for every row it computes.
+// A row is split over L lanes (L = groups per row, a power of two up to the subgroup size), and the workgroup
+// computes BLOCK_SIZE / L rows in parallel; the row sum is a clustered subgroup add over those L lanes.
+// k = 2048: 32 lanes per row, 2 rows in parallel; k = 512: 8 lanes per row, 8 rows in parallel.
+// The rows of one token are a few MB per dispatch, so the time is load latency, hidden by the waves in
+// flight: the register count decides the speed on RDNA, so a lane holds one row of weights at a time.
+//
+// Signed weights without per-weight selects: a sign table entry holds, for the 8 weights of one code,
+// x / y = 0xFF per negative byte and z / w = its +1 (two's complement), so signed = (grid ^ x) + z.
+// Grid bytes are > 0 and < 128, so no byte carries into its neighbour.
+//
+// GATE_GLU: the up (binding 0) and gate (binding 6) experts of the same rows in one pass, written as
+// silu(gate * gate_scale) * (up * up_scale) (the MoE SWIGLU), so the two products share the activations,
+// the expert ids and the table setup, and the GLU needs no dispatch of its own.
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+
+#define B_TYPE block_q8_1_x4_packed128
+#define USE_SUBGROUP_ADD_NO_SHMEM 1
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#ifdef GATE_GLU
+layout (binding = 6) readonly buffer AG {A_TYPE data_ag[];};
+#if defined(A_TYPE_PACKED16)
+layout (binding = 6) readonly buffer AG_PACKED16 {A_TYPE_PACKED16 data_ag_packed16[];};
+#endif
+#endif
+
+#define GROUPS_PER_BLOCK 4u
+
+// sign masks of 8 weights from their 8 sign bits
+uvec2 sign_masks(const uint signs) {
+    uint m0 = 0u, m1 = 0u;
+    [[unroll]] for (uint b = 0; b < 4u; ++b) {
+        m0 |= ((signs >> b) & 1u) * (0xFFu << (8u * b));
+        m1 |= ((signs >> (b + 4u)) & 1u) * (0xFFu << (8u * b));
+    }
+    return uvec2(m0, m1);
+}
+
+#if defined(DATA_A_ROCMIQ2_XXS)
+// indexed by the high byte of a code word (7 sign bits + parity, shift bit); z / w also add the +/-4 shift
+shared uvec4 sgn_tab[256];
+
+void init_tables() {
+    for (uint t = gl_LocalInvocationIndex.x; t < 256u; t += gl_WorkGroupSize.x) {
+        const uint s7 = t & 0x7Fu;
+        const uvec2 m = sign_masks(s7 | ((uint(bitCount(s7)) & 1u) << 7u));
+        const uint delta = (t & 0x80u) != 0u ? 0xFBFBFBFCu : 0x04040404u; // -4 or +4 per byte
+        sgn_tab[t] = uvec4(m, (m.x & 0x01010101u) + delta, (m.y & 0x01010101u) + delta);
+    }
+}
+
+// 64-weight sub group g of a block: the block scale word and 8 code words (8-bit grid index, signs, shift)
+struct group_t {
+    uint sc;
+    uint cw[8];
+};
+
+#define LOAD_GROUP(BUF, BUF16, ib, g, q) \
+    q.sc = uint(BUF[ib].sc); \
+    [[unroll]] for (uint w = 0; w < 8u; ++w) { q.cw[w] = uint(BUF[ib].qs[8u * g + w]); }
+
+float group_dot(const group_t q, const uint g, const ivec4 bq[4], const vec2 bd) {
+    int isum[2];
+    [[unroll]] for (uint i = 0; i < 2u; ++i) {
+        int s = 0;
+        [[unroll]] for (uint w4 = 0; w4 < 4u; ++w4) {
+            const uint w = 4u * i + w4;
+            const uint code = q.cw[w];
+            const uvec2 gr = iq2xxs_grid[code & 0xFFu];
+            const uvec4 t = sgn_tab[code >> 8u];
+            const ivec4 bw = bq[w >> 1u];
+            const bool odd = (w & 1u) != 0u;
+            s += dotPacked4x8EXT(int((gr.x ^ t.x) + t.z), odd ? bw.z : bw.x);
+            s += dotPacked4x8EXT(int((gr.y ^ t.y) + t.w), odd ? bw.w : bw.y);
+        }
+        isum[i] = s;
+    }
+    return 0.125 * rocmiq_sub_scale(q.sc, g) * fma(bd.x, float(isum[0]), bd.y * float(isum[1]));
+}
+
+#elif defined(DATA_A_IQ3_XXS)
+// indexed by the 7 sign bits of 8 weights (the 8th sign is the parity)
+shared uvec4 sgn_tab[128];
+
+void init_tables() {
+    for (uint t = gl_LocalInvocationIndex.x; t < 128u; t += gl_WorkGroupSize.x) {
+        const uvec2 m = sign_masks(t | ((uint(bitCount(t)) & 1u) << 7u));
+        sgn_tab[t] = uvec4(m, m.x & 0x01010101u, m.y & 0x01010101u);
+    }
+}
+
+// two 32-weight sub blocks 2g, 2g + 1 of a block: 8 words of two grid indices, the two sign + scale words, d
+struct group_t {
+    float d;
+    uint cw[8];
+    uint aux[2];
+};
+
+#define LOAD_GROUP(BUF, BUF16, ib, g, q) \
+    q.d = float(BUF16[ib].d); \
+    [[unroll]] for (uint w = 0; w < 8u; ++w) { q.cw[w] = uint(BUF16[ib].qs[8u * g + w]); } \
+    [[unroll]] for (uint sb = 0; sb < 2u; ++sb) { \
+        q.aux[sb] = uint(BUF16[ib].qs[32u + 4u * g + 2u * sb]) | (uint(BUF16[ib].qs[33u + 4u * g + 2u * sb]) << 16u); \
+    }
+
+float group_dot(const group_t q, const uint g, const ivec4 bq[4], const vec2 bd) {
+    float r = 0.0;
+    [[unroll]] for (uint sb = 0; sb < 2u; ++sb) {
+        const uint aux = q.aux[sb];
+        int s = 0;
+        [[unroll]] for (uint l = 0; l < 4u; ++l) {
+            const uint w = 4u * sb + l;
+            const uint idx = q.cw[w];
+            const uvec4 t = sgn_tab[(aux >> (7u * l)) & 0x7Fu];
+            const uint g1 = iq3xxs_grid[idx & 0xFFu];
+            const uint g2 = iq3xxs_grid[idx >> 8u];
+            const ivec4 bw = bq[w >> 1u];
+            const bool odd = (w & 1u) != 0u;
+            s += dotPacked4x8EXT(int((g1 ^ t.x) + t.z), odd ? bw.z : bw.x);
+            s += dotPacked4x8EXT(int((g2 ^ t.y) + t.w), odd ? bw.w : bw.y);
+        }
+        // sub block scale d * (0.5 + s4) * 0.5 = d * (2 s4 + 1) / 4
+        r = fma(float(2u * (aux >> 28u) + 1u) * (sb == 0u ? bd.x : bd.y), float(s), r);
+    }
+    return 0.25 * q.d * r;
+}
+#endif
+
+uint a_offset, b_offset, d_offset;
+
+// the 64 activations of group c of the row: half (c & 1) of block_q8_1_x4 number c / 2
+void load_b(const uint bx0, const uint c, out ivec4 bq[4], out vec2 bd) {
+    const uint bx = bx0 + (c >> 1u);
+    const uint hf = c & 1u;
+    [[unroll]] for (uint q = 0; q < 4u; ++q) {
+        bq[q] = data_b[bx].qs[4u * hf + q];
+    }
+    bd = vec2(float(data_b[bx].ds[2u * hf].x), float(data_b[bx].ds[2u * hf + 1u].x));
+}
+
+float cluster_sum(const float x, const uint L) {
+    if (L == 1u) {
+        return x;
+    } else if (L == 2u) {
+        return subgroupClusteredAdd(x, 2);
+    } else if (L == 4u) {
+        return subgroupClusteredAdd(x, 4);
+    } else if (L == 8u) {
+        return subgroupClusteredAdd(x, 8);
+    } else if (L == 16u) {
+        return subgroupClusteredAdd(x, 16);
+    } else if (L == 32u) {
+        return subgroupClusteredAdd(x, 32);
+    }
+    return subgroupAdd(x);
+}
+
+#ifdef GATE_GLU
+// v = up, vg = gate
+void write_row(const uint row, float v, float vg) {
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0_BYID) != 0) {
+        v *= float(data_fuse0[expert_id]);
+    }
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE1_BYID) != 0) {
+        vg *= float(data_fuse1[expert_id]);
+    }
+    data_d[d_offset + row] = D_TYPE(vg / (1.0f + exp(-vg)) * v);
+}
+#else
+void write_row(const uint row, float v, float vg) {
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
+        v += float(data_fuse0[expert_id * p.stride_d + row]);
+    }
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0) != 0) {
+        v *= float(data_fuse0[gl_WorkGroupID.y]);
+    }
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0_BYID) != 0) {
+        v *= float(data_fuse0[expert_id]);
+    }
+    if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE1) != 0) {
+        v *= float(data_fuse1[gl_WorkGroupID.y]);
+    }
+    data_d[d_offset + row] = D_TYPE(v);
+}
+#endif
+
+#if !defined(A_TYPE_PACKED16)
+#define data_a_packed16 data_a
+#define data_ag_packed16 data_ag
+#endif
+
+// the products of group g of block ib (up, and gate with GATE_GLU)
+void row_dots(const uint ib, const uint g, const ivec4 bq[4], const vec2 bd, out float v, out float vg) {
+    group_t q;
+    LOAD_GROUP(data_a, data_a_packed16, ib, g, q)
+#ifdef GATE_GLU
+    group_t qg;
+    LOAD_GROUP(data_ag, data_ag_packed16, ib, g, qg)
+    vg = group_dot(qg, g, bq, bd);
+#else
+    vg = 0.0;
+#endif
+    v = group_dot(q, g, bq, bd);
+}
+
+void main() {
+    init_tables();
+    init_iq_shmem(gl_WorkGroupSize); // grid (+ UE4M3 table), ends with the barrier for both
+
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+    if (first_row >= p.stride_d) {
+        return;
+    }
+    const uint n_rows = min(NUM_ROWS, p.stride_d - first_row);
+
+    get_offsets(a_offset, b_offset, d_offset);
+
+    const uint nb  = p.ncols / QUANT_K;          // blocks per row
+    const uint ng  = GROUPS_PER_BLOCK * nb;      // 64-weight groups per row
+    uint L = 1u;
+    while (2u * L <= ng && 2u * L <= gl_SubgroupSize && 2u * L <= gl_WorkGroupSize.x) {
+        L *= 2u;
+    }
+    const uint rp  = gl_WorkGroupSize.x / L;     // rows in parallel
+    const uint tid = gl_LocalInvocationID.x;
+    const uint rg  = tid / L;
+    const uint j   = tid % L;
+    const uint bx0 = b_offset / 128u;            // first block_q8_1_x4 of this column
+    const uint steps = (n_rows + rp - 1u) / rp;
+
+    if (ng == L) {
+        // one group per lane: its 64 activations stay in registers for all rows
+        ivec4 bq[4];
+        vec2 bd;
+        load_b(bx0, j, bq, bd);
+        const uint ib0 = a_offset + (first_row + rg) * nb + j / GROUPS_PER_BLOCK;
+        const uint g = j % GROUPS_PER_BLOCK;
+        for (uint s = 0; s < steps; ++s) {
+            const uint r0 = s * rp + rg;
+            float v = 0.0, vg = 0.0;
+            if (r0 < n_rows) {
+                row_dots(ib0 + s * rp * nb, g, bq, bd, v, vg);
+            }
+            const float t = cluster_sum(v, L);
+#ifdef GATE_GLU
+            const float tg = cluster_sum(vg, L);
+#else
+            const float tg = 0.0;
+#endif
+            if (j == 0u && r0 < n_rows) {
+                write_row(first_row + r0, t, tg);
+            }
+        }
+    } else {
+        // more groups than lanes: each lane walks groups j, j + L, ...
+        for (uint s = 0; s < steps; ++s) {
+            const uint r0 = s * rp + rg;
+            float acc = 0.0, accg = 0.0;
+            if (r0 < n_rows) {
+                const uint ibr = a_offset + (first_row + r0) * nb;
+                for (uint c = j; c < ng; c += L) {
+                    ivec4 bq[4];
+                    vec2 bd;
+                    load_b(bx0, c, bq, bd);
+                    float v, vg;
+                    row_dots(ibr + c / GROUPS_PER_BLOCK, c % GROUPS_PER_BLOCK, bq, bd, v, vg);
+                    acc += v;
+                    accg += vg;
+                }
+            }
+            const float t = cluster_sum(acc, L);
+#ifdef GATE_GLU
+            const float tg = cluster_sum(accg, L);
+#else
+            const float tg = 0.0;
+#endif
+            if (j == 0u && r0 < n_rows) {
+                write_row(first_row + r0, t, tg);
+            }
+        }
+    }
+}

@@ -8023,6 +8023,80 @@ struct test_mul_mat_vec_fusion : public test_case {
     }
 };
 
+// MoE up + gate + SWIGLU of one token as llama-graph builds it: each product optionally scaled by its per-expert
+// ".scale" gathered by the expert ids (the Vulkan backend fuses the whole pattern into one pass for ROCmIQ2_XXS)
+struct test_moe_up_gate_glu : public test_case {
+    const ggml_type type;
+    const int n_mats;
+    const int n_used;
+    const int64_t n_ff;
+    const int64_t n_embd;
+    const bool b;      // broadcast activations: one row for all experts, as in the model
+    const bool scales;
+
+    std::string vars() override {
+        return VARS_TO_STR7(type, n_mats, n_used, n_ff, n_embd, b, scales);
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MOE_UP_GATE_GLU";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    double max_nmse_err() override {
+        return 5e-3;
+    }
+
+    uint64_t op_flops(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return 2 * 2 * n_ff * n_embd * n_used;
+    }
+
+    test_moe_up_gate_glu(ggml_type type = GGML_TYPE_ROCMIQ2_XXS, int n_mats = 8, int n_used = 4,
+            int64_t n_ff = 64, int64_t n_embd = 256, bool b = true, bool scales = true)
+        : type(type), n_mats(n_mats), n_used(n_used), n_ff(n_ff), n_embd(n_embd), b(b), scales(scales) {
+        GGML_ASSERT(n_used <= n_mats);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * ups   = ggml_new_tensor_3d(ctx, type, n_embd, n_ff, n_mats);
+        ggml_tensor * gates = ggml_new_tensor_3d(ctx, type, n_embd, n_ff, n_mats);
+        ggml_set_name(ups, "ups");
+        ggml_set_name(gates, "gates");
+
+        ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, 1);
+        ggml_set_name(ids, "ids");
+        if (n_used != n_mats) {
+            ids = ggml_view_2d(ctx, ids, n_used, 1, ids->nb[1], 0);
+            ggml_set_name(ids, "view_of_ids");
+        }
+
+        ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, b ? 1 : n_used, 1);
+        ggml_set_name(cur, "cur");
+
+        auto product = [&](ggml_tensor * w) {
+            ggml_tensor * r = ggml_mul_mat_id(ctx, w, cur, ids);
+            if (scales) {
+                ggml_tensor * s = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n_mats, 1);
+                r = ggml_mul(ctx, r, ggml_get_rows(ctx, s, ids));
+            }
+            return r;
+        };
+        ggml_tensor * up   = product(ups);
+        ggml_tensor * gate = product(gates);
+
+        ggml_tensor * out = ggml_swiglu_split(ctx, gate, up);
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        init_mul_mat_id_tensors(ctx, n_mats);
+    }
+};
+
 // GGML_OP_SUM
 struct test_sum : public test_case {
     const ggml_type type;
@@ -12420,6 +12494,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             true, 16, 8, b, false, true, false));
     }
 
+    // MoE up + gate + SWIGLU (fused for ROCmIQ2_XXS and IQ3_XXS on Vulkan): row tails, every lane split (k 256 .. 2048),
+    // the multi-group path (k 8192), no ids view, broadcast and per-expert activations, with and without scales
+    for (ggml_type type : {GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ2_XXS}) {
+        for (bool scales : {false, true}) {
+            for (bool b : {false, true}) {
+                test_cases.emplace_back(new test_moe_up_gate_glu(type, 8, 4, 64, 256, b, scales));
+                test_cases.emplace_back(new test_moe_up_gate_glu(type, 8, 2, 300, 2048, b, scales));
+                if (type != GGML_TYPE_IQ2_XXS) {
+                    test_cases.emplace_back(new test_moe_up_gate_glu(type, 8, 4, 40, 512, b, scales));
+                    test_cases.emplace_back(new test_moe_up_gate_glu(type, 4, 4, 48, 1024, b, scales));
+                    test_cases.emplace_back(new test_moe_up_gate_glu(type, 4, 2, 24, 8192, b, scales));
+                }
+            }
+        }
+    }
+
     for (int64_t k : {96, 896, 1024, 2880}) {
         for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU}) {
             test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_Q8_0, glu_op, 1, 32, k,
@@ -12610,6 +12700,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
                              GGML_TYPE_IQ1_S, GGML_TYPE_ROCMIQ1_S, GGML_TYPE_Q2_0_ROCMFPX}) {
         test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 2048, 1, 512));
         test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 256, 8, false, 512, 1, 2048));
+    }
+    // T1s: the same expert shapes with 16 experts (the same 8 are read per token; 16x less CPU setup)
+    for (ggml_type type_a : {GGML_TYPE_ROCMIQ2_XXS, GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ3_XXS, GGML_TYPE_Q2_K, GGML_TYPE_Q4_K, GGML_TYPE_ROCMIQ1_S}) {
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 16, 8, false, 2048, 1, 512));
+        test_cases.emplace_back(new test_mul_mat_id(type_a, GGML_TYPE_F32, 16, 8, false, 512, 1, 2048));
     }
 
     // DeepSeek-V4.1 prompt processing at depth: raw window (128 + ubatch, padded to 768) + n_comp compressed rows,

@@ -718,6 +718,12 @@ struct vk_device_struct {
     bool integer_dot_product;
     // 0: default, 1: force mmvq, -1: disable mmvq
     int32_t mmvq_mode;
+    // ROCmIQ2_XXS / IQ3_XXS MUL_MAT_ID use the short-row expert MMVQ kernel (mul_mat_vecq_expert.comp)
+    bool mmvq_expert {};
+    // the expert kernel for rows of k <= 1024 (more rows per workgroup), and up + gate + SWIGLU in one dispatch
+    // (same kernel, GATE_GLU; [1] for k <= 1024), by expert type
+    vk_pipeline pipeline_expert_short[GGML_TYPE_COUNT];
+    vk_pipeline pipeline_expert_glu[2][GGML_TYPE_COUNT];
 
     bool subgroup_size_control;
     uint32_t subgroup_min_size;
@@ -1103,6 +1109,7 @@ typedef std::vector<vk_submission> vk_sequence;
 
 // MUL_MAT_ID: fuse0 is the raw per-expert scale [n_expert], read at the selected expert id (GET_ROWS elided)
 #define MAT_VEC_FUSION_FLAGS_SCALE0_BYID 0x10
+#define MAT_VEC_FUSION_FLAGS_SCALE1_BYID 0x20
 
 struct vk_staging_memcpy {
     vk_staging_memcpy(void * _dst, const void * _src, size_t _n) : dst(_dst), src(_src), n(_n) {}
@@ -1291,6 +1298,9 @@ struct ggml_backend_vk_context {
     bool fused_hc_post_gate {};
     // GET_ROWS(per-expert scale) + MUL_MAT_ID + MUL: the gather is elided, the shader reads the scale by expert id
     bool fused_mmid_scale_byid {};
+    // fused MoE up + gate + SWIGLU: node indices of the two MUL_MAT_ID and their scale GET_ROWS (-1: none)
+    bool fused_moe_glu {};
+    int moe_glu_up_mmid = -1, moe_glu_gate_mmid = -1, moe_glu_up_gr = -1, moe_glu_gate_gr = -1;
     rms_norm_mode fused_rms_norm_mode {RMS_NORM_COUNT};
 
     // for GGML_VK_PERF_LOGGER
