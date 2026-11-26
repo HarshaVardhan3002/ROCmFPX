@@ -1779,10 +1779,11 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
     ggml_tensor * s = nullptr;
     if (w_s) {
         const int64_t n_expert = w_s->ne[0];
-        const int64_t n_tokens = cur->ne[2];
+        const int64_t n_tokens = ids->ne[1];
         ggml_build_forward_expand(gf, cur);
         s = ggml_reshape_3d(ctx0, w_s, 1, n_expert, 1);
-        if (n_tokens > 1) {
+        // the REPEAT is only redundant for exactly one token (a ubatch can have 0 tokens left after output selection)
+        if (n_tokens != 1) {
             s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
         }
         s = ggml_get_rows(ctx0, s, ids);
