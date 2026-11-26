@@ -164,6 +164,8 @@ enum llm_arch {
     LLM_ARCH_MAION_CODER,
     LLM_ARCH_KIMI_LINEAR,
     LLM_ARCH_KIMI_K3,
+    LLM_ARCH_RAON1,
+    LLM_ARCH_RAON1_NANO,
     LLM_ARCH_GLM5_NEXT,
     LLM_ARCH_TALKIE,
     LLM_ARCH_MELLUM,
@@ -298,6 +300,7 @@ enum llm_kv {
     LLM_KV_ATTENTION_VALUE_LENGTH,
     LLM_KV_ATTENTION_LAYERNORM_EPS,
     LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,
+    LLM_KV_ATTENTION_LATENT_NORM_RMS_EPS,
     LLM_KV_ATTENTION_GROUPNORM_EPS,
     LLM_KV_ATTENTION_GROUPNORM_GROUPS,
     LLM_KV_ATTENTION_CAUSAL,
@@ -651,6 +654,7 @@ enum llm_tensor {
     LLM_TENSOR_SSM_F_A,             // kimi: forget gate projection A
     LLM_TENSOR_SSM_F_B,             // kimi: forget gate projection B
     LLM_TENSOR_SSM_BETA,            // kimi: beta mixing coefficient and qwen3.5
+    LLM_TENSOR_SSM_RDA,             // raon1: write gate offset
     LLM_TENSOR_SSM_G_A,             // kimi: output gate projection A
     LLM_TENSOR_SSM_G_B,             // kimi: output gate projection B
     LLM_TENSOR_SSM_G,               // kimi-k3: full-rank KDA gate
@@ -720,6 +724,8 @@ enum llm_tensor {
     LLM_TENSOR_HC_FFN_FN,
     LLM_TENSOR_HC_FFN_BASE,
     LLM_TENSOR_HC_FFN_SCALE,
+    LLM_TENSOR_HC_ATTN_CHART,  // raon1nano
+    LLM_TENSOR_HC_FFN_CHART,   // raon1nano
     LLM_TENSOR_HC_ATTN_NORM,   // qwen4exp
     LLM_TENSOR_HC_ATTN_DOWN,   // qwen4exp
     LLM_TENSOR_HC_ATTN_UP,     // qwen4exp
@@ -948,6 +954,10 @@ struct LLM_TN {
 struct llm_tensor_info {
     llm_tensor_layer layer;
     ggml_op op;
+    // the graph may use the weight with a non-contiguous src1: MLA attn_k_b (permuted q_nope view) and attn_v_b (permuted attention output
+    // on the flash-attention path; contiguous without FA). the loader probes with such a src1, so a buffer type that rejects it is skipped
+    // (CPU AMX; CANN, OpenCL and ET for some weight types)
+    bool src1_noncont = false;
 };
 
 std::vector<llm_arch> llm_arch_all();
