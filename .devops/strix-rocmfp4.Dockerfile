@@ -94,6 +94,10 @@ ENTRYPOINT ["/app/llama-cli"]
 
 FROM base AS server
 
+# Inside the container the server has to listen on all interfaces, or Docker port publishing cannot reach it.
+# Keep it private on the host side: publish to loopback only and set an API key, for example
+#   docker run -p 127.0.0.1:8080:8080 -e LLAMA_API_KEY=<secret> -v /models:/models:ro <image> -m /models/x.gguf
+# See docs/ROCmFPX-SERVING.md, "Running safely".
 ENV LLAMA_ARG_HOST=0.0.0.0
 
 COPY --from=build /app/full/llama-server /app

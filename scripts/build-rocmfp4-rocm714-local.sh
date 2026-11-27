@@ -10,6 +10,9 @@
 #
 # The build output goes to build-rdna4-rocm714/ by default. Can be overridden:
 #   env BUILD_DIR=build-custom ROCM_VERSION=7.14.0a20260624 scripts/build-rocmfp4-rocm714-local.sh
+#
+# Set ROCM_TARBALL_SHA256 to pin the toolchain: the tarball is then checked before it is extracted.
+# Without it the script prints the tarball's SHA256 so you can record and pin it.
 
 set -euo pipefail
 
@@ -41,7 +44,24 @@ if [[ ! -x "$ROCM_LOCAL_PATH/llvm/bin/clang" ]]; then
 
     if [[ ! -s "$TARBALL" ]]; then
         echo "Downloading ROCm ${ROCM_VERSION} from TheRock nightlies..."
-        curl -L -o "$TARBALL" "$TARBALL_URL"
+        # https only, fail on HTTP errors instead of saving an error page
+        curl -fL --proto '=https' --tlsv1.2 -o "$TARBALL.part" "$TARBALL_URL"
+        mv "$TARBALL.part" "$TARBALL"
+    fi
+
+    TARBALL_SHA256="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+    if [[ -n "${ROCM_TARBALL_SHA256:-}" ]]; then
+        if [[ "$TARBALL_SHA256" != "${ROCM_TARBALL_SHA256,,}" ]]; then
+            echo "Error: SHA256 mismatch for $TARBALL" >&2
+            echo "  expected ${ROCM_TARBALL_SHA256}" >&2
+            echo "  got      ${TARBALL_SHA256}" >&2
+            exit 1
+        fi
+        echo "SHA256 OK: $TARBALL_SHA256"
+    else
+        echo "Warning: ROCM_TARBALL_SHA256 is not set, so the tarball is not pinned." >&2
+        echo "  SHA256 of the downloaded tarball: $TARBALL_SHA256" >&2
+        echo "  Re-run with ROCM_TARBALL_SHA256=$TARBALL_SHA256 to pin it." >&2
     fi
 
     echo "Extracting to $ROCM_LOCAL_PATH..."

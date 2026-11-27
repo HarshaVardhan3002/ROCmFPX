@@ -539,6 +539,31 @@ Use this request policy with that cap:
 }
 ```
 
+## Running safely
+
+`llama-server` listens on `127.0.0.1` by default and has no API key. That is fine on your own machine. When anything
+else can reach it, lock it down:
+
+- Bind to loopback (`--host 127.0.0.1`) unless you really need the network, and set `--api-key` (or `LLAMA_API_KEY`).
+- Do not combine `--cors-origins '*'` with no API key; the server warns about this at start.
+- Use `--no-webui` on headless servers.
+- Leave `--connect` (peer tunnel) and `-hf` downloads off in production; load local GGUF files you have checked.
+- Docker (`.devops/strix-rocmfp4.Dockerfile`): the container listens on `0.0.0.0` so port publishing works. Publish
+  to host loopback only and set a key, mount models read-only:
+
+  ```bash
+  docker run -p 127.0.0.1:8080:8080 -e LLAMA_API_KEY=<secret> -v /models:/models:ro <image> -m /models/x.gguf
+  ```
+
+- Offline builds: `-DLLAMA_CURL=OFF -DLLAMA_USE_PREBUILT_UI=OFF` (and leave `LLAMA_CONNECT` off) so the build and the
+  binary do not download anything.
+- Toolchain scripts: `scripts/setup-rocm-7.2.1-rpath-local.sh` checks every `.deb` against the SHA256 in the ROCm
+  package index. `scripts/build-rocmfp4-rocm714-local.sh` checks the nightly tarball when `ROCM_TARBALL_SHA256` is set
+  and prints the hash otherwise, so you can pin it.
+- Converters: run `convert_hf_to_gguf.py` on trusted local snapshots, ideally in an isolated environment. Some
+  upstream converters load model code with `trust_remote_code=True`; the downloads that ROCmFPX converters add (for
+  example the Mimi codec for Maya2) are pinned to a fixed revision.
+
 ## Validation
 
 Before reporting a serving result, record:

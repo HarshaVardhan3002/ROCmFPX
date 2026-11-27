@@ -2,12 +2,13 @@
 # Download and extract a user-local ROCm 7.2.1 rpath toolchain.
 #
 # This intentionally does not modify system apt sources or install packages.
+# Every .deb is checked against the SHA256 listed in the ROCm package index before it is extracted.
 
 set -euo pipefail
 
 ROCM_VERSION="${ROCM_VERSION:-7.2.1}"
 UBUNTU_CODENAME="${UBUNTU_CODENAME:-jammy}"
-ROOT="${ROOT:-/home/caf/rocm-${ROCM_VERSION}-test}"
+ROOT="${ROOT:-$HOME/rocm-${ROCM_VERSION}-local}"
 BASE_URL="${BASE_URL:-https://repo.radeon.com/rocm/apt/${ROCM_VERSION}}"
 PKG_GZ="$ROOT/apt/Packages.gz"
 DEB_DIR="$ROOT/debs"
@@ -18,8 +19,11 @@ RPATH_SUFFIX="rpath${ROCM_VERSION}"
 
 mkdir -p "$ROOT/apt" "$DEB_DIR" "$EXTRACT_DIR"
 
+# https only, fail on HTTP errors instead of saving an error page
+fetch() { curl -fL --proto '=https' --tlsv1.2 -o "$2.part" "$1" && mv "$2.part" "$2"; }
+
 if [[ ! -s "$PKG_GZ" ]]; then
-    curl -L "$BASE_URL/dists/${UBUNTU_CODENAME}/main/binary-amd64/Packages.gz" -o "$PKG_GZ"
+    fetch "$BASE_URL/dists/${UBUNTU_CODENAME}/main/binary-amd64/Packages.gz" "$PKG_GZ"
 fi
 
 manifest="$ROOT/manifest.tsv"
@@ -80,23 +84,31 @@ while queue:
 with open(manifest, "w", encoding="utf-8") as fh:
     for package in seen:
         rec = records[package]
-        fh.write(f"{package}\t{rec['Filename']}\t{rec.get('Size', '0')}\n")
+        sha = rec.get("SHA256", "")
+        if len(sha) != 64:
+            raise SystemExit(f"no SHA256 for {package} in the ROCm index")
+        fh.write(f"{package}\t{rec['Filename']}\t{rec.get('Size', '0')}\t{sha}\n")
 
 total = sum(int(records[p].get("Size", "0")) for p in seen)
 print(f"packages={len(seen)} download_bytes={total}")
 PY
 
-while IFS=$'\t' read -r package filename size; do
+while IFS=$'\t' read -r package filename size sha; do
     deb="$DEB_DIR/${filename##*/}"
     if [[ ! -s "$deb" ]]; then
         echo "download $package ($size bytes)"
-        curl -L "$BASE_URL/$filename" -o "$deb"
+        fetch "$BASE_URL/$filename" "$deb"
     else
         echo "reuse $package"
     fi
+    if ! echo "$sha  $deb" | sha256sum -c --status -; then
+        echo "SHA256 mismatch for $deb (expected $sha), removing it" >&2
+        rm -f "$deb"
+        exit 1
+    fi
 done < "$manifest"
 
-while IFS=$'\t' read -r package filename size; do
+while IFS=$'\t' read -r package filename size sha; do
     deb="$DEB_DIR/${filename##*/}"
     echo "extract $package"
     dpkg-deb -x "$deb" "$EXTRACT_DIR"
